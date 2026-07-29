@@ -1,0 +1,55 @@
+{
+  "name": "shopify-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "test": "node scripts/checkRouteAuth.js && node tests/pctStageDefs.test.js",
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@google-cloud/tasks": "^6.2.3",
+    "@google/genai": "^1.52.0",
+    "@shopify/shopify-api": "^11.14.1",
+    "@shopify/shopify-app-session-storage-memory": "^4.0.20",
+    "@supabase/supabase-js": "^2.90.0",
+    "@upstash/redis": "^1.37.0",
+    "adm-zip": "^0.5.17",
+    "axios": "^1.16.0",
+    "bottleneck": "^2.19.5",
+    "bullmq": "^5.76.8",
+    "canvas": "^3.2.3",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.0.1",
+    "firebase-admin": "^13.5.0",
+    "fs": "^0.0.1-security",
+    "google-auth-library": "^10.6.2",
+    "google-libphonenumber": "^3.2.43",
+    "ioredis": "^5.10.1",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.6",
+    "p-limit": "^3.1.0",
+    "path": "^0.12.7",
+    "pdf-lib": "^1.17.1",
+    "pdf2pic": "^3.2.0",
+    "pdfjs-dist": "^3.11.174",
+    "pdfkit": "^0.17.2",
+    "puppeteer": "^24.22.0",
+    "replicate": "^1.4.0",
+    "resend": "^6.9.1",
+    "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "devDependencies": {
+    "supabase": "^2.76.15"
+  }
+}
