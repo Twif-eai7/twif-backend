@@ -66,7 +66,8 @@ const allowedOrigins = [
   "https://jng-686756139829.asia-south2.run.app",
   "https://warm-physics-470205-e0.web.app",
   "https://warm-physics-470205-e0.firebaseapp.com",
-  "https://jng.global"
+  "https://jng.global",
+  "https://twif-frontend-567076465284.asia-south1.run.app"
 ];
 
 app.use(
