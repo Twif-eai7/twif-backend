@@ -2,7 +2,7 @@
 //
 // Uses pdf-lib (pure JS, Node-native — no Chromium/puppeteer needed). The NDA
 // wording here is duplicated (not imported) from the frontend's Agreement tab
-// (jng-portal-frontend/src/pages/Auth/OnboardingPage.jsx) — the two are separate
+// (twif-frontend/src/pages/Auth/OnboardingPage.jsx) — the two are separate
 // repos/deploys, so a true shared import isn't practical. If the wording ever
 // changes, update both places.
 //
@@ -70,10 +70,10 @@ const BODY_CONTENT = [
   { type: 'bullets', items: ['Immediate termination.', 'Suspension of all orders.', 'Cancellation of outstanding business.', 'Recovery of direct losses and damages as permitted by law.', 'Injunctive relief.', 'Specific performance.', 'Recovery of legal expenses.'] },
 
   { type: 'heading', text: '13. DISPUTE RESOLUTION' },
-  { type: 'para', text: 'The Parties shall first attempt to resolve disputes amicably. Failing resolution within thirty (30) days, disputes shall be referred to arbitration under the Arbitration and Conciliation Act, 1996. Seat of arbitration: Gurugram, Haryana, India. Language: English. The arbitration award shall be final and binding.' },
+  { type: 'para', text: 'The Parties shall first attempt to resolve disputes amicably. Failing resolution within thirty (30) days, disputes shall be referred to arbitration under the Arbitration and Conciliation Act, 1996. Seat of arbitration: Bangalore, India. Language: English. The arbitration award shall be final and binding.' },
 
   { type: 'heading', text: '14. GOVERNING LAW' },
-  { type: 'para', text: 'This Agreement shall be governed by the laws of India. Courts at Gurugram, Haryana shall have exclusive jurisdiction for interim and enforcement proceedings.' },
+  { type: 'para', text: 'This Agreement shall be governed by the laws of India. Courts at Bangalore, India shall have exclusive jurisdiction for interim and enforcement proceedings.' },
 
   { type: 'heading', text: '15. TERM' },
   { type: 'para', text: 'This Agreement shall remain effective during the business relationship. Obligations relating to Confidentiality, Intellectual Property, Trade Secrets, Buyer Protection, and Non-Circumvention shall survive for five (5) years following termination, or longer where required by law or contract.' },
@@ -83,7 +83,7 @@ const BODY_CONTENT = [
 
   { type: 'schedule-heading', text: 'SCHEDULE A' },
   { type: 'heading', text: 'Buyer Exclusivity & Product Development Protocol' },
-  { type: 'para', text: 'This Schedule forms an integral part of the Master Non-Disclosure, Non-Circumvention & Non-Solicitation Agreement entered into between Twif Tech LLP ("Twif") and the Vendor.' },
+  { type: 'para', text: 'This Schedule forms an integral part of the Master Non-Disclosure, Non-Circumvention & Non-Solicitation Agreement entered into between Twif Technologies Private Limited ("Twif") and the Vendor.' },
 
   { type: 'subheading', text: '1. Buyer Exclusivity' },
   { type: 'para', text: 'The Vendor acknowledges that all buyers introduced by Twif are proprietary business relationships of Twif. Accordingly, the Vendor shall not, directly or indirectly, contact, solicit, negotiate, quote, invoice, supply, or conduct business with any buyer introduced by Twif without Twif’s prior written approval; accept enquiries, RFQs, or purchase orders directly from such buyers; share buyer contact details with any third party; or encourage buyers to bypass Twif for any commercial transaction. This restriction shall remain valid during the business relationship and for five (5) years following its termination.' },
@@ -241,7 +241,7 @@ async function buildSignedNdaPdf({ organization, ownerJobTitle, adminSignature, 
   centerText(cover, '& NON-SOLICITATION AGREEMENT', fonts.serifBold, 17, 598)
   centerText(cover, '(Vendor Confidentiality & Business Protection Agreement)', fonts.serif, 11, 566, INK_SOFT)
 
-  const subtitle = `${vendorName} <> Twif Tech LLP`
+  const subtitle = `${vendorName} <> Twif Technologies Private Limited`
   const subtitleWidth = fonts.bold.widthOfTextAtSize(subtitle, 13)
   const boxX = (PAGE_SIZE[0] - subtitleWidth) / 2 - 16
   cover.drawRectangle({ x: boxX, y: 505, width: subtitleWidth + 32, height: 26, color: rgb(0.91, 0.78, 0.45) })
@@ -254,7 +254,7 @@ async function buildSignedNdaPdf({ organization, ownerJobTitle, adminSignature, 
   flow.text('This Agreement is entered into on ' + effectiveDate + ' ("Effective Date")', { font: fonts.serifBold, size: 11 })
   flow.spacer(6)
   flow.text('BETWEEN', { font: fonts.bold, size: 10.5 })
-  flow.text('Twif Tech LLP, having its registered office at 36, Pace City 1, Sector 37, Gurugram, Haryana – 122001, India (hereinafter referred to as "Twif", which expression shall include its successors, affiliates and permitted assigns);', { font: fonts.serif, size: 10.5 })
+  flow.text('Twif Technologies Private Limited, having its offices in Bangalore, India, with global headquarters in Singapore (hereinafter referred to as "Twif", which expression shall include its successors, affiliates and permitted assigns);', { font: fonts.serif, size: 10.5 })
   flow.spacer(6)
   flow.text('AND', { font: fonts.bold, size: 10.5 })
   flow.text(`Vendor Name: ${vendorName}`, { font: fonts.serifBold, size: 10.5 })
@@ -299,13 +299,13 @@ async function buildSignedNdaPdf({ organization, ownerJobTitle, adminSignature, 
 
   await drawSignatureColumn(doc, flow.page, fonts, {
     x: rightX, y: sigTop, width: colWidth,
-    label: 'For Twif Tech LLP, through its authorized signatory',
+    label: 'For Twif Technologies Private Limited, through its authorized signatory',
     signatureType: adminSignature?.signature_type || null,
     signatureName: adminSignature?.signature_name || null,
     signatureImage: adminSignature?.signature_image || null,
     ipAddress: null, // Twif's countersignature IP is logged in the activity log, not repeated here
     date: adminSignature?.signed_at ? formatIST(adminSignature.signed_at) : '-',
-    company: 'Twif Tech LLP',
+    company: 'Twif Technologies Private Limited',
     signatoryName: adminSignature?.full_name || 'Authorized Signatory',
     designation: adminSignature?.designation || '-',
   })
@@ -332,7 +332,7 @@ async function buildSignedNdaPdf({ organization, ownerJobTitle, adminSignature, 
   const allPages = doc.getPages()
   allPages.forEach((page, i) => {
     page.drawLine({ start: { x: MARGIN, y: 40 }, end: { x: PAGE_SIZE[0] - MARGIN, y: 40 }, thickness: 0.5, color: rgb(0.85, 0.83, 0.78) })
-    page.drawText('Twif Tech LLP', { x: MARGIN, y: 28, size: 8, font: fonts.regular, color: INK_SOFT })
+    page.drawText('Twif Technologies Private Limited', { x: MARGIN, y: 28, size: 8, font: fonts.regular, color: INK_SOFT })
     centerText(page, `${i + 1} of ${allPages.length}`, fonts.regular, 8, 28, INK_SOFT)
     const idText = `Document ID: ${docId}`
     const idWidth = fonts.regular.widthOfTextAtSize(idText, 8)

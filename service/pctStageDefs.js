@@ -1,4 +1,4 @@
-// Ported from jng-portal-frontend/src/components/pctBeta/constants.js — keep in sync.
+// Ported from twif-frontend/src/components/pctBeta/constants.js — keep in sync.
 
 const STAGE_CARD_DEFS = [
   { id: 'po', title: 'PO Receipt & Lock', owner: 'Merchant', sla: '0–1 day', status: 'active',

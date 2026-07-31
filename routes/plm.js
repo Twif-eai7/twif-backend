@@ -448,7 +448,7 @@ const triggerWorker = async (envVars) => {
   const auth   = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] })
   const client = await auth.getClient()
   const region = 'asia-south2'
-  const url    = `https://${region}-run.googleapis.com/v2/projects/${process.env.GCP_PROJECT_ID}/locations/${region}/jobs/jng-catalog-worker:run`
+  const url    = `https://${region}-run.googleapis.com/v2/projects/${process.env.GCP_PROJECT_ID}/locations/${region}/jobs/twif-catalog-worker:run`
   return client.request({
     url, method: 'POST',
     data: { overrides: { containerOverrides: [{ env: envVars }] } },
@@ -3257,7 +3257,7 @@ function generateSamplePOPDF({ poNumber, poDate, currency, buyerOrg, supplierOrg
 
     // Signature
     doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#000')
-      .text('FOR TWIF TECH LLP', L, bottomY + 70, { width: ACK_W - 10 })
+      .text('FOR JNITIN GLOBAL LLP', L, bottomY + 70, { width: ACK_W - 10 })
     doc.strokeColor('#000').lineWidth(0.5).moveTo(L, bottomY + 100).lineTo(L + 160, bottomY + 100).stroke()
     doc.font('Helvetica').fontSize(8).fillColor('#666').text('AUTHORISED SIGNATORY', L, bottomY + 106, { width: 160 })
 

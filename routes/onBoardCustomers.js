@@ -238,11 +238,11 @@ async function sendVendorApplicationCopy({ toEmail, application, signatureName, 
     const { data, error } = await resend.emails.send({
       from: RESEND_FROM_EMAIL,
       to: toEmail,
-      subject: `Your submitted application & signed NDA - Twif Tech LLP`,
+      subject: `Your submitted application & signed NDA - Twif Technologies Private Limited`,
       html: `
         <div style="font-family:sans-serif;max-width:640px;margin:0 auto;padding:40px 20px;color:#1a1a1a;">
           <h2 style="margin-bottom:4px;">Application submitted for review</h2>
-          <p style="color:#8e8e8e;font-size:13px;margin-top:0;">This is your copy of the details you submitted to Twif Tech LLP ("Twif") as part of vendor onboarding.</p>
+          <p style="color:#8e8e8e;font-size:13px;margin-top:0;">This is your copy of the details you submitted to Twif Technologies Private Limited ("Twif") as part of vendor onboarding.</p>
 
           <h3 style="margin-bottom:8px;">Personal &amp; business info</h3>
           <table style="width:100%;border-collapse:collapse;margin:0 0 20px;font-size:13px;">

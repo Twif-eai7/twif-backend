@@ -58,15 +58,10 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 
 const allowedOrigins = [
-  "https://jn-global.myshopify.com",
-  "https://jnitin.com",
-  "https://www.jnitin.com",
   "http://localhost:5173",
   "http://localhost:5174",
-  "https://jng-686756139829.asia-south2.run.app",
   "https://warm-physics-470205-e0.web.app",
   "https://warm-physics-470205-e0.firebaseapp.com",
-  "https://jng.global",
   "https://twif-frontend-567076465284.asia-south1.run.app",
   "https://twif-frontend-sekcjhf7va-el.a.run.app"
 ];
