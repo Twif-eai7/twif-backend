@@ -60,8 +60,6 @@ app.use(express.json({ limit: '10mb' }));
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
-  "https://warm-physics-470205-e0.web.app",
-  "https://warm-physics-470205-e0.firebaseapp.com",
   "https://twif-frontend-567076465284.asia-south1.run.app",
   "https://twif-frontend-sekcjhf7va-el.a.run.app"
 ];

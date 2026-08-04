@@ -13,7 +13,7 @@ const COMPANY = {
   gstin: "06AAPFJ1459D1ZD",
   pan: "AAPFJ1459D",
   cin: "AAO-8540",
-  email: "accounts@jnitinglobal.com",
+  email: "hi@eai7.com",
 };
 
 const BANK = {
@@ -840,7 +840,7 @@ router.get('/invoices', async (req, res) => {
 //   gstin: "06AAPFJ1459D1ZD",
 //   pan: "AAPFJ1459D",
 //   cin: "AAO-8540",
-//   email: "accounts@jnitinglobal.com",
+//   email: "hi@eai7.com",
 // };
 
 // const BANK = {

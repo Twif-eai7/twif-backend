@@ -1383,10 +1383,10 @@ router.post('/workspaces', async (req, res) => {
       await supabase.from('npd2_invites').insert([{
         workspace_id: workspace.id, email: supplierEmail, role: 'supplier', token: supplierToken,
       }])
-      supplierLink = `https://jn-global.myshopify.com/pages/plm-access?token=${supplierToken}`
+      supplierLink = `${frontendUrl}/plm/accept?token=${supplierToken}`
     }
 
-    const buyerLink = `https://jn-global.myshopify.com/pages/plm-access?token=${buyerToken}`
+    const buyerLink = `${frontendUrl}/plm/accept?token=${buyerToken}`
 
     const { data: cs } = await supabase
       .from('npd2_catalog_skus')
@@ -1461,7 +1461,7 @@ router.post('/workspaces/:id/invite', async (req, res) => {
     const field = role === 'buyer' ? 'buyer_email' : 'supplier_email'
     await supabase.from('npd2_workspaces').update({ [field]: email }).eq('id', workspaceId)
 
-    const link = `https://jn-global.myshopify.com/pages/plm-access?token=${token}`
+    const link = `${frontendUrl}/plm/accept?token=${token}`
 
     const { data: ws } = await supabase
       .from('npd2_workspaces')
@@ -3257,7 +3257,7 @@ function generateSamplePOPDF({ poNumber, poDate, currency, buyerOrg, supplierOrg
 
     // Signature
     doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#000')
-      .text('FOR JNITIN GLOBAL LLP', L, bottomY + 70, { width: ACK_W - 10 })
+      .text('FOR TWIF TECH LLP', L, bottomY + 70, { width: ACK_W - 10 })
     doc.strokeColor('#000').lineWidth(0.5).moveTo(L, bottomY + 100).lineTo(L + 160, bottomY + 100).stroke()
     doc.font('Helvetica').fontSize(8).fillColor('#666').text('AUTHORISED SIGNATORY', L, bottomY + 106, { width: 160 })
 

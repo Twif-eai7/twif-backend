@@ -20,6 +20,7 @@ const supabase = require('../supabaseClient')
 const upload   = require('../upload')
 
 const NPD_BUCKET = 'npd'
+const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -809,7 +810,7 @@ router.post('/workspaces', async (req, res) => {
     const token = require('crypto').randomUUID()
     await supabase.from('npd_invites').insert([{ sku_id: sku.id, email: buyerEmail, role: 'buyer', token }])
 
-    const buyerLink = `https://YOUR-STORE.myshopify.com/pages/npd-access?token=${token}`
+    const buyerLink = `${frontendUrl}/plm/accept?token=${token}`
     const workspace = { ...sku, supplier: sup, season: sea, npd2_invites: [{ email: buyerEmail, role: 'buyer', accepted_at: null }] }
 
     return res.json({ success: true, workspace, buyerLink })
@@ -829,7 +830,7 @@ router.post('/workspaces/:id/invite', async (req, res) => {
     const token = require('crypto').randomUUID()
     await supabase.from('npd_invites').insert([{ sku_id: id, email, role, token }])
 
-    const link = `https://YOUR-STORE.myshopify.com/pages/npd-access?token=${token}`
+    const link = `${frontendUrl}/plm/accept?token=${token}`
     return res.json({ success: true, token, link })
   } catch (err) {
     console.error('❌ POST /plm/workspaces/:id/invite:', err)
@@ -1297,7 +1298,7 @@ router.post('/catalog/skus/:id/invite', async (req, res) => {
     .update({ [field]: email })
     .eq('id', id)
 
-  const link = `https://YOUR-STORE.myshopify.com/pages/npd-access?token=${token}`
+  const link = `${frontendUrl}/plm/accept?token=${token}`
 
   // TODO: plug in your email provider here (Klaviyo, Postmark etc.)
   // for now the link comes back in the response so you can test manually

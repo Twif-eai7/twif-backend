@@ -12,7 +12,7 @@ const shopify = shopifyApi({
   apiVersion: '2025-01', // Use latest stable API version
   
   // Host configuration
-  hostName: process.env.HOST || 'https://shopify-backend-gt39.onrender.com',
+  hostName: process.env.HOST || 'localhost',
   hostScheme: 'https',
   sessionStorage: new MemorySessionStorage(),
   logger: {
