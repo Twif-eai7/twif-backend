@@ -34,7 +34,7 @@ router.post('/send-email', verifyCloudTasksRequest, async (req, res) => {
   }
 
   const batchEmails = recipients.map((email) => ({
-    from: 'care@jnitin.com',
+    from: process.env.RESEND_FROM_EMAIL || 'hi@eai7.com',
     to: [email],
     subject,
     html,

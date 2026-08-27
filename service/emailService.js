@@ -103,7 +103,7 @@ function wrapTemplate({ accentColor = '#000000', iconChar, badgeLabel, badgeColo
                 <tr>
                   <td>
                     <p style="margin:0;font-size:11px;color:#aaaaaa;font-family:'Courier New',monospace;letter-spacing:0.06em;text-transform:uppercase;">
-                      Automated · PO Management System
+                      Automated · Twif Portal
                     </p>
                   </td>
                   <td style="text-align:right;">
@@ -545,7 +545,7 @@ async function sendAlertEmail(recipients, alertMessage, poDetails, alertType = '
     console.log(`📨 Sending batch of ${filteredRecipients.length} emails directly...`);
 
     const batchEmails = filteredRecipients.map((recipient) => ({
-      from: 'care@jnitin.com',
+      from: process.env.RESEND_FROM_EMAIL || 'hi@eai7.com',
       to: [recipient.email],
       subject,
       html,
