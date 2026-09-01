@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.worker
+      - -t
+      - asia-south1-docker.pkg.dev/twif-backend/cloud-run-source-deploy/twif-catalog-worker:latest
+      - .
+images:
+  - asia-south1-docker.pkg.dev/twif-backend/cloud-run-source-deploy/twif-catalog-worker:latest
+timeout: 1800s
+options:
+  logging: CLOUD_LOGGING_ONLY

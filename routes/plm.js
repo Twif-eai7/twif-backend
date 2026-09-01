@@ -443,16 +443,72 @@ router.get('/catalog', async (req, res) => {
 })
 
 const { GoogleAuth } = require('google-auth-library')
+const { execFile } = require('child_process')
+const { promisify } = require('util')
+const execFileAsync = promisify(execFile)
 
-const triggerWorker = async (envVars) => {
+// Production path: Application Default Credentials (Cloud Run metadata SA).
+const triggerWorkerViaApi = async (envVars) => {
+  const projectId = process.env.GCP_PROJECT_ID
+  if (!projectId) {
+    throw new Error('GCP_PROJECT_ID is not set — cannot trigger Cloud Run catalog worker')
+  }
+
   const auth   = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] })
   const client = await auth.getClient()
-  const region = 'asia-south2'
-  const url    = `https://${region}-run.googleapis.com/v2/projects/${process.env.GCP_PROJECT_ID}/locations/${region}/jobs/twif-catalog-worker:run`
+  const region = process.env.GCP_REGION || 'asia-south1'
+  const url    = `https://${region}-run.googleapis.com/v2/projects/${projectId}/locations/${region}/jobs/twif-catalog-worker:run`
   return client.request({
     url, method: 'POST',
     data: { overrides: { containerOverrides: [{ env: envVars }] } },
   })
+}
+
+// Local-dev fallback when ADC OAuth isn't set up: still runs the Cloud Run Job,
+// but authenticates via the user's existing `gcloud auth login` session.
+const triggerWorkerViaGcloudCli = async (envVars) => {
+  const projectId = process.env.GCP_PROJECT_ID
+  if (!projectId) {
+    throw new Error('GCP_PROJECT_ID is not set — cannot trigger Cloud Run catalog worker')
+  }
+  const region = process.env.GCP_REGION || 'asia-south1'
+  const updates = (envVars || [])
+    .filter(v => v?.name && v.value != null)
+    .map(v => `${v.name}=${v.value}`)
+    .join(',')
+
+  const args = [
+    'run', 'jobs', 'execute', 'twif-catalog-worker',
+    `--project=${projectId}`,
+    `--region=${region}`,
+    '--async',
+  ]
+  if (updates) args.push(`--update-env-vars=${updates}`)
+
+  const { stdout, stderr } = await execFileAsync('gcloud', args, {
+    timeout: 60_000,
+    maxBuffer: 2 * 1024 * 1024,
+  })
+  console.log('✅ Cloud Run job triggered via gcloud CLI', (stdout || stderr || '').trim())
+  return { status: 200, data: { name: 'gcloud-cli-execute', stdout, stderr } }
+}
+
+const triggerWorker = async (envVars) => {
+  try {
+    return await triggerWorkerViaApi(envVars)
+  } catch (err) {
+    const msg = err?.message || String(err)
+    const needsCliFallback =
+      /Could not load the default credentials/i.test(msg) ||
+      /Could not load the default credentials/i.test(err?.errors?.[0]?.message || '') ||
+      /default credentials were not found/i.test(msg) ||
+      /Unable to authenticate/i.test(msg)
+
+    if (!needsCliFallback) throw err
+
+    console.warn(`⚠️  ADC unavailable (${msg}) — triggering Cloud Run job via gcloud CLI`)
+    return triggerWorkerViaGcloudCli(envVars)
+  }
 }
 
 router.post('/catalog/upload', upload.single('catalogFile'), async (req, res) => {
@@ -805,11 +861,12 @@ router.post('/supplier-catalog/upload', requireAuth, upload.single('catalogFile'
 
     // Clean up orphaned upload row if it was created
     if (uploadRow?.id) {
-      await supabase
-        .from('npd2_catalog_uploads')
-        .update({ status: 'error', error_message: err.message })
-        .eq('id', uploadRow.id)
-        .catch(() => {})
+      try {
+        await supabase
+          .from('npd2_catalog_uploads')
+          .update({ status: 'error', error_message: err.message })
+          .eq('id', uploadRow.id)
+      } catch (_) { /* best-effort */ }
     }
 
     return res.status(500).json({ error: err.message })
@@ -3742,144 +3799,296 @@ router.post('/supplier-catalog/skus/bulk', requireAuth, upload.array('images'), 
 
 
 // ═══════════════════════════════════════════════
-// VIDEO CALLS (Daily.co)
+// VIDEO CALLS (Vedeeo call-invites)
 // ═══════════════════════════════════════════════
-const DAILY_API_KEY  = process.env.DAILY_API_KEY
-const DAILY_API_BASE = 'https://api.daily.co/v1'
+const vedeeo = require('../service/vedeeoService')
 
-/**
- * Creates a scoped meeting token for one participant.
- * Tokens scope a user to a specific room and expire in 1h so the room URL
- * alone is never enough to join a workspace call from outside the app.
- */
-async function createDailyToken(roomName, userId, userName) {
-  const resp = await fetch(`${DAILY_API_BASE}/meeting-tokens`, {
-    method:  'POST',
-    headers: {
-      Authorization:  `Bearer ${DAILY_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      properties: {
-        room_name:          roomName,
-        user_id:            userId,
-        user_name:          userName || 'Participant',
-        exp:                Math.floor(Date.now() / 1000) + 3600,
-        enable_screenshare: true,
-      },
-    }),
-  })
-  const data = await resp.json()
-  if (!resp.ok) throw new Error(data?.error || data?.info || 'Failed to create meeting token')
-  return data.token
+const VIDEO_WS_SELECT = `
+  id, video_room_name, video_room_url,
+  merchant_member_id, buyer_member_id, supplier_member_id,
+  auto_code, description,
+  npd2_catalog_skus ( auto_code, description )
+`
+
+function workspaceChatRole(ws, memberId) {
+  if (ws?.buyer_member_id === memberId) return 'buyer'
+  if (ws?.supplier_member_id === memberId) return 'supplier'
+  return 'merchant'
 }
 
-/**
- * Creates a new Daily.co room for a workspace.
- * Room auto-destructs after 24h; participants are ejected at expiry.
- * Name format: plm-{workspaceIdPrefix}-{base36 timestamp} for uniqueness
- * across the multiple rooms a workspace may have over its lifetime.
- */
-async function createDailyRoom(workspaceId) {
-  const roomName = `plm-${workspaceId.replace(/-/g, '').slice(0, 12)}-${Date.now().toString(36)}`
-  const resp = await fetch(`${DAILY_API_BASE}/rooms`, {
-    method:  'POST',
-    headers: {
-      Authorization:  `Bearer ${DAILY_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      name: roomName,
-      properties: {
-        enable_chat:        false,
-        enable_screenshare: true,
-        enable_recording:   false,
-        max_participants:   8,
-        exp:                Math.floor(Date.now() / 1000) + 86400,
-        eject_at_room_exp:  true,
-      },
-    }),
-  })
-  const data = await resp.json()
-  if (!resp.ok) throw new Error(data?.error || data?.info || 'Failed to create Daily room')
+function otherMemberIds(ws, memberId) {
+  return [ws?.merchant_member_id, ws?.buyer_member_id, ws?.supplier_member_id]
+    .filter(id => id && id !== memberId)
+}
+
+function pickCallee(ws, callerId, targetMemberId) {
+  const others = otherMemberIds(ws, callerId)
+  if (targetMemberId && others.includes(targetMemberId)) return targetMemberId
+  if (others.length === 1) return others[0]
+  if (ws.buyer_member_id && ws.buyer_member_id !== callerId) return ws.buyer_member_id
+  if (ws.supplier_member_id && ws.supplier_member_id !== callerId) return ws.supplier_member_id
+  if (ws.merchant_member_id && ws.merchant_member_id !== callerId) return ws.merchant_member_id
+  return null
+}
+
+function callTitle(ws) {
+  const sku = ws?.npd2_catalog_skus || {}
+  return vedeeo.clip(ws?.description || sku.description || ws?.auto_code || sku.auto_code || 'Video call', 120)
+}
+
+async function loadVideoWorkspace(id) {
+  const { data, error } = await supabase
+    .from('npd2_workspaces')
+    .select(VIDEO_WS_SELECT)
+    .eq('id', id)
+    .maybeSingle()
+  if (error) throw error
   return data
+}
+
+async function memberNamesById(ids) {
+  const unique = [...new Set((ids || []).filter(Boolean))]
+  if (!unique.length) return {}
+  const { data } = await supabase
+    .from('organization_members')
+    .select('id, full_name, email')
+    .in('id', unique)
+  const map = {}
+  for (const m of data || []) map[m.id] = m.full_name || m.email || 'Participant'
+  return map
+}
+
+async function persistVideoInvite(workspaceId, invite) {
+  await supabase
+    .from('npd2_workspaces')
+    .update({
+      video_room_name: invite?.inviteId || null,
+      video_room_url:  invite?.hostJoinUrl || invite?.embedJoinUrl || null,
+    })
+    .eq('id', workspaceId)
+}
+
+async function clearVideoInvite(workspaceId) {
+  await supabase
+    .from('npd2_workspaces')
+    .update({ video_room_name: null, video_room_url: null })
+    .eq('id', workspaceId)
+}
+
+async function insertVideoCallComment(workspaceId, memberId, role, metadata) {
+  const { data, error } = await supabase.from('npd2_comments').insert([{
+    workspace_id:     workspaceId,
+    author_member_id: memberId,
+    role,
+    type:             'milestone',
+    body:             null,
+    metadata,
+  }]).select().single()
+  if (error) throw error
+  return data
+}
+
+function callResponse(invite, { role, created = false, comment = null, userName } = {}) {
+  const displayName = role === 'host'
+    ? (invite?.callerName || userName)
+    : (invite?.calleeName || userName)
+  return {
+    success: true,
+    created,
+    comment,
+    inviteId:      invite?.inviteId,
+    roomId:        invite?.roomId,
+    status:        invite?.status,
+    role,
+    joinUrl:       vedeeo.joinUrlForRole(invite, role, displayName),
+    hostJoinUrl:   invite?.hostJoinUrl || null,
+    guestJoinUrl:  invite?.guestJoinUrl || null,
+    embedJoinUrl:  invite?.embedJoinUrl || null,
+    notification:  invite?.notification || null,
+    calleeUserId:  invite?.calleeUserId || null,
+    callerUserId:  invite?.callerUserId || null,
+    invite,
+  }
+}
+
+function videoError(res, err, label) {
+  console.error(`❌ ${label}:`, err)
+  const status = err.status && Number.isInteger(err.status) ? err.status : 500
+  return res.status(status >= 400 && status < 600 ? status : 500).json({ error: err.message })
 }
 
 /**
  * POST /plm/sku-workspaces/:id/video-call
- * Starts or joins the workspace's active video room.
+ * Caller: create a Vedeeo ringing invite and return hostJoinUrl (embed).
+ * Callee / rejoin: accept or return the existing invite's join URL.
  *
- * Body:    { memberId, userName }
- * Returns: { success, roomUrl, roomName, token }
- *
- * - First caller creates the Daily room and a "video_call_started" system
- *   comment is logged in the chat timeline.
- * - Subsequent callers join the existing room (verified live on Daily).
- * - Each participant receives their own scoped token.
+ * Body: { memberId, userName, targetMemberId?, calleeName? }
  */
 router.post('/sku-workspaces/:id/video-call', async (req, res) => {
   try {
     const { id } = req.params
-    const { memberId, userName } = req.body
-    if (!memberId)      return res.status(400).json({ error: 'memberId required' })
-    if (!DAILY_API_KEY) return res.status(500).json({ error: 'Video calls not configured — DAILY_API_KEY missing' })
+    const { memberId, userName, targetMemberId, calleeName } = req.body
+    if (!memberId) return res.status(400).json({ error: 'memberId required' })
+    if (!vedeeo.isConfigured()) {
+      return res.status(500).json({ error: 'Video calls not configured — VIDEOMEET_BASE_URL or VIDEOMEET_API_KEY missing' })
+    }
 
-    const { data: workspace, error: wsErr } = await supabase
-      .from('npd2_workspaces')
-      .select('video_room_name, video_room_url, merchant_member_id, buyer_member_id, supplier_member_id')
-      .eq('id', id)
-      .maybeSingle()
-    if (wsErr) throw wsErr
+    const workspace = await loadVideoWorkspace(id)
     if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
+    const role = workspaceChatRole(workspace, memberId)
 
-    let role = 'merchant'
-    if (workspace.buyer_member_id        === memberId) role = 'buyer'
-    else if (workspace.supplier_member_id === memberId) role = 'supplier'
-
-    let roomName = workspace.video_room_name
-    let roomUrl  = workspace.video_room_url
-
-    // Verify the persisted room still exists on Daily (rooms auto-expire in 24h)
-    if (roomName) {
-      const check = await fetch(`${DAILY_API_BASE}/rooms/${roomName}`, {
-        headers: { Authorization: `Bearer ${DAILY_API_KEY}` },
-      })
-      if (!check.ok) {
-        roomName = null
-        roomUrl  = null
+    const existing = await vedeeo.findOpenInvite(id, memberId, workspace.video_room_name)
+    if (existing) {
+      if (existing.calleeUserId === memberId && vedeeo.isRinging(existing)) {
+        const accepted = await vedeeo.acceptInvite(existing.inviteId, memberId)
+        await persistVideoInvite(id, accepted)
+        const comment = await insertVideoCallComment(id, memberId, role, {
+          event: 'video_call_accepted',
+          inviteId: accepted.inviteId,
+          roomId: accepted.roomId,
+        })
+        return res.json(callResponse(accepted, { role: 'guest', comment, userName }))
       }
+      const callRole = existing.callerUserId === memberId ? 'host' : 'guest'
+      return res.json(callResponse(existing, { role: callRole, userName }))
     }
 
-    let created = false
-    let startComment = null
-
-    if (!roomName) {
-      const room = await createDailyRoom(id)
-      roomName = room.name
-      roomUrl  = room.url
-      created  = true
-
-      await supabase
-        .from('npd2_workspaces')
-        .update({ video_room_name: roomName, video_room_url: roomUrl })
-        .eq('id', id)
-
-      const { data: commentRow } = await supabase.from('npd2_comments').insert([{
-        workspace_id:     id,
-        author_member_id: memberId,
-        role,
-        type:             'milestone',
-        body:             null,
-        metadata:         { event: 'video_call_started', started_by: userName || role },
-      }]).select().single()
-      startComment = commentRow
+    const calleeUserId = pickCallee(workspace, memberId, targetMemberId)
+    if (!calleeUserId) {
+      return res.status(400).json({ error: 'No other workspace member to call. Invite a buyer or supplier first.' })
     }
 
-    const token = await createDailyToken(roomName, memberId, userName || role)
-    return res.json({ success: true, roomUrl, roomName, token, created, comment: startComment })
+    const names = await memberNamesById([memberId, calleeUserId])
+    const invite = await vedeeo.createInvite({
+      conversationId: id,
+      callerUserId:   memberId,
+      callerName:     userName || names[memberId] || role,
+      calleeUserId,
+      calleeName:     calleeName || names[calleeUserId] || undefined,
+      title:          callTitle(workspace),
+    })
+
+    await persistVideoInvite(id, invite)
+    const comment = await insertVideoCallComment(id, memberId, role, {
+      event:         'video_call_started',
+      started_by:    userName || names[memberId] || role,
+      inviteId:      invite.inviteId,
+      roomId:        invite.roomId,
+      calleeUserId,
+      calleeName:    invite.calleeName || names[calleeUserId] || null,
+    })
+
+    return res.json(callResponse(invite, { role: 'host', created: true, comment, userName }))
   } catch (err) {
-    console.error('❌ POST /plm/sku-workspaces/:id/video-call:', err)
-    return res.status(500).json({ error: err.message })
+    return videoError(res, err, 'POST /plm/sku-workspaces/:id/video-call')
+  }
+})
+
+/**
+ * GET /plm/sku-workspaces/:id/video-call/pending?memberId=
+ * RINGING invites for this member in this workspace (missed-call recovery).
+ */
+router.get('/sku-workspaces/:id/video-call/pending', async (req, res) => {
+  try {
+    const { id } = req.params
+    const memberId = req.query.memberId
+    if (!memberId) return res.status(400).json({ error: 'memberId required' })
+    if (!vedeeo.isConfigured()) return res.json({ invites: [] })
+
+    const pending = await vedeeo.listPending(memberId)
+    const invites = pending.filter(i => i.conversationId === id && vedeeo.isRinging(i))
+    return res.json({
+      invites: invites.map(invite => callResponse(invite, { role: 'guest' })),
+    })
+  } catch (err) {
+    return videoError(res, err, 'GET /plm/sku-workspaces/:id/video-call/pending')
+  }
+})
+
+/**
+ * POST /plm/sku-workspaces/:id/video-call/accept
+ * Body: { memberId, inviteId? }
+ */
+router.post('/sku-workspaces/:id/video-call/accept', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { memberId, userName, inviteId } = req.body
+    if (!memberId) return res.status(400).json({ error: 'memberId required' })
+
+    const workspace = await loadVideoWorkspace(id)
+    if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
+    const resolvedId = inviteId || workspace.video_room_name
+    if (!resolvedId) return res.status(400).json({ error: 'No ringing invite to accept' })
+
+    const accepted = await vedeeo.acceptInvite(resolvedId, memberId)
+    await persistVideoInvite(id, accepted)
+    const role = workspaceChatRole(workspace, memberId)
+    const comment = await insertVideoCallComment(id, memberId, role, {
+      event: 'video_call_accepted',
+      inviteId: accepted.inviteId,
+      roomId: accepted.roomId,
+    })
+    return res.json(callResponse(accepted, { role: 'guest', comment, userName }))
+  } catch (err) {
+    return videoError(res, err, 'POST /plm/sku-workspaces/:id/video-call/accept')
+  }
+})
+
+/**
+ * POST /plm/sku-workspaces/:id/video-call/decline
+ * Body: { memberId, inviteId? }
+ */
+router.post('/sku-workspaces/:id/video-call/decline', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { memberId, inviteId } = req.body
+    if (!memberId) return res.status(400).json({ error: 'memberId required' })
+
+    const workspace = await loadVideoWorkspace(id)
+    if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
+    const resolvedId = inviteId || workspace.video_room_name
+    if (!resolvedId) return res.status(400).json({ error: 'No ringing invite to decline' })
+
+    await vedeeo.declineInvite(resolvedId, memberId)
+    if (!inviteId || inviteId === workspace.video_room_name) await clearVideoInvite(id)
+
+    const role = workspaceChatRole(workspace, memberId)
+    const comment = await insertVideoCallComment(id, memberId, role, {
+      event: 'video_call_declined',
+      inviteId: resolvedId,
+    })
+    return res.json({ success: true, comment })
+  } catch (err) {
+    return videoError(res, err, 'POST /plm/sku-workspaces/:id/video-call/decline')
+  }
+})
+
+/**
+ * POST /plm/sku-workspaces/:id/video-call/cancel
+ * Body: { memberId, inviteId? }
+ */
+router.post('/sku-workspaces/:id/video-call/cancel', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { memberId, inviteId } = req.body
+    if (!memberId) return res.status(400).json({ error: 'memberId required' })
+
+    const workspace = await loadVideoWorkspace(id)
+    if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
+    const resolvedId = inviteId || workspace.video_room_name
+    if (!resolvedId) return res.status(400).json({ error: 'No ringing invite to cancel' })
+
+    await vedeeo.cancelInvite(resolvedId, memberId)
+    if (!inviteId || inviteId === workspace.video_room_name) await clearVideoInvite(id)
+
+    const role = workspaceChatRole(workspace, memberId)
+    const comment = await insertVideoCallComment(id, memberId, role, {
+      event: 'video_call_cancelled',
+      inviteId: resolvedId,
+    })
+    return res.json({ success: true, comment })
+  } catch (err) {
+    return videoError(res, err, 'POST /plm/sku-workspaces/:id/video-call/cancel')
   }
 })
 
@@ -3895,26 +4104,15 @@ router.post('/sku-workspaces/:id/video-call/invite', async (req, res) => {
     const { id } = req.params
     const { memberId, userName, targetMemberIds, emails } = req.body
     if (!memberId) return res.status(400).json({ error: 'memberId required' })
-    if (!DAILY_API_KEY) return res.status(500).json({ error: 'Video calls not configured — DAILY_API_KEY missing' })
+    if (!vedeeo.isConfigured()) {
+      return res.status(500).json({ error: 'Video calls not configured — VIDEOMEET_BASE_URL or VIDEOMEET_API_KEY missing' })
+    }
 
-    const { data: workspace, error: wsErr } = await supabase
-      .from('npd2_workspaces')
-      .select(`
-        video_room_name, video_room_url,
-        merchant_member_id, buyer_member_id, supplier_member_id,
-        auto_code, description,
-        npd2_catalog_skus ( auto_code, description )
-      `)
-      .eq('id', id)
-      .maybeSingle()
-    if (wsErr) throw wsErr
+    const workspace = await loadVideoWorkspace(id)
     if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
     if (!workspace.video_room_name) return res.status(400).json({ error: 'No active video call to invite to' })
 
-    let role = 'merchant'
-    if (workspace.buyer_member_id        === memberId) role = 'buyer'
-    else if (workspace.supplier_member_id === memberId) role = 'supplier'
-
+    const role = workspaceChatRole(workspace, memberId)
     const allMembers = [
       workspace.merchant_member_id,
       workspace.buyer_member_id,
@@ -3956,79 +4154,55 @@ router.post('/sku-workspaces/:id/video-call/invite', async (req, res) => {
       if (result.successfulRecipients?.length) emailed = result.successfulRecipients
     }
 
-    const { data: commentRow, error: cmErr } = await supabase.from('npd2_comments').insert([{
-      workspace_id:     id,
-      author_member_id: memberId,
-      role,
-      type:             'milestone',
-      body:             null,
-      metadata:         {
-        event:              'video_call_invited',
-        invited_by:         userName || role,
-        invited_member_ids: targets,
-        invited_emails:     emailed.length ? emailed : emailList,
-      },
-    }]).select().single()
-    if (cmErr) throw cmErr
+    const commentRow = await insertVideoCallComment(id, memberId, role, {
+      event:              'video_call_invited',
+      invited_by:         userName || role,
+      invited_member_ids: targets,
+      invited_emails:     emailed.length ? emailed : emailList,
+      inviteId:           workspace.video_room_name,
+    })
 
     return res.json({ success: true, invited: targets, emailed, comment: commentRow })
   } catch (err) {
-    console.error('❌ POST /plm/sku-workspaces/:id/video-call/invite:', err)
-    return res.status(500).json({ error: err.message })
+    return videoError(res, err, 'POST /plm/sku-workspaces/:id/video-call/invite')
   }
 })
 
 /**
  * POST /plm/sku-workspaces/:id/video-call/end
- * Ends the active call: deletes the Daily room, clears workspace columns,
- * and logs a "video_call_ended" system comment.
+ * Caller hang-up: cancel a still-ringing Vedeeo invite, clear workspace columns,
+ * and log a "video_call_ended" system comment.
  *
- * Body:    { memberId }
- * Returns: { success }
+ * Body: { memberId, inviteId? }
  */
 router.post('/sku-workspaces/:id/video-call/end', async (req, res) => {
   try {
     const { id } = req.params
-    const { memberId } = req.body
+    const { memberId, inviteId } = req.body
 
-    const { data: workspace } = await supabase
-      .from('npd2_workspaces')
-      .select('video_room_name, merchant_member_id, buyer_member_id, supplier_member_id')
-      .eq('id', id)
-      .maybeSingle()
+    const workspace = await loadVideoWorkspace(id)
+    const resolvedId = inviteId || workspace?.video_room_name
+
+    if (resolvedId && vedeeo.isConfigured()) {
+      try {
+        await vedeeo.cancelInvite(resolvedId, memberId)
+      } catch {
+        // already accepted / expired / not the caller — still clear local state
+      }
+    }
 
     if (workspace?.video_room_name) {
-      // Best-effort delete on Daily — never fail the request if Daily is unreachable
-      if (DAILY_API_KEY) {
-        await fetch(`${DAILY_API_BASE}/rooms/${workspace.video_room_name}`, {
-          method:  'DELETE',
-          headers: { Authorization: `Bearer ${DAILY_API_KEY}` },
-        }).catch(() => {})
-      }
-
-      await supabase
-        .from('npd2_workspaces')
-        .update({ video_room_name: null, video_room_url: null })
-        .eq('id', id)
-
-      let role = 'merchant'
-      if (workspace.buyer_member_id        === memberId) role = 'buyer'
-      else if (workspace.supplier_member_id === memberId) role = 'supplier'
-
-      await supabase.from('npd2_comments').insert([{
-        workspace_id:     id,
-        author_member_id: memberId,
-        role,
-        type:             'milestone',
-        body:             null,
-        metadata:         { event: 'video_call_ended' },
-      }])
+      await clearVideoInvite(id)
+      const role = workspaceChatRole(workspace, memberId)
+      await insertVideoCallComment(id, memberId, role, {
+        event: 'video_call_ended',
+        inviteId: resolvedId || null,
+      })
     }
 
     return res.json({ success: true })
   } catch (err) {
-    console.error('❌ POST /plm/sku-workspaces/:id/video-call/end:', err)
-    return res.status(500).json({ error: err.message })
+    return videoError(res, err, 'POST /plm/sku-workspaces/:id/video-call/end')
   }
 })
 
