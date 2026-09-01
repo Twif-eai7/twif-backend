@@ -61,7 +61,10 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "https://twif-frontend-567076465284.asia-south1.run.app",
-  "https://twif-frontend-sekcjhf7va-el.a.run.app"
+  "https://twif-frontend-sekcjhf7va-el.a.run.app",
+  "https://plm.eai7.com",
+  "https://eai7.com",
+  "https://www.eai7.com",
 ];
 
 app.use(
