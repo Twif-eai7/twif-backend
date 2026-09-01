@@ -3806,7 +3806,6 @@ const vedeeo = require('../service/vedeeoService')
 const VIDEO_WS_SELECT = `
   id, video_room_name, video_room_url,
   merchant_member_id, buyer_member_id, supplier_member_id,
-  auto_code, description,
   npd2_catalog_skus ( auto_code, description )
 `
 
@@ -3833,7 +3832,7 @@ function pickCallee(ws, callerId, targetMemberId) {
 
 function callTitle(ws) {
   const sku = ws?.npd2_catalog_skus || {}
-  return vedeeo.clip(ws?.description || sku.description || ws?.auto_code || sku.auto_code || 'Video call', 120)
+  return vedeeo.clip(sku.description || sku.auto_code || 'Video call', 120)
 }
 
 async function loadVideoWorkspace(id) {
@@ -4134,8 +4133,8 @@ router.post('/sku-workspaces/:id/video-call/invite', async (req, res) => {
     }
 
     const sku = workspace.npd2_catalog_skus || {}
-    const productName = workspace.description || sku.description || workspace.auto_code || sku.auto_code || 'Workspace'
-    const workspaceLabel = workspace.auto_code || sku.auto_code || id.slice(0, 8)
+    const productName = sku.description || sku.auto_code || 'Workspace'
+    const workspaceLabel = sku.auto_code || id.slice(0, 8)
     const joinLink = `${frontendUrl}/plm?workspace=${id}`
 
     let emailed = []
