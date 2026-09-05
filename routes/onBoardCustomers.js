@@ -385,6 +385,63 @@ router.get('/categories', async (req, res) => {
 })
 
 // ─────────────────────────────────────────────
+// GET /org-customers/gst-lookup?gstin=06AAPFJ1459D1ZD
+// Resolves a GSTIN to registered address + pincode via Appyflow.
+// Soft-fails if APPYFLOW_GST_KEY is not set so onboarding still works.
+// ─────────────────────────────────────────────
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
+
+router.get('/gst-lookup', requireAuth, async (req, res) => {
+  const gstin = String(req.query.gstin || '').toUpperCase().trim()
+
+  if (!GSTIN_RE.test(gstin)) {
+    return res.status(400).json({ error: 'Invalid GSTIN format' })
+  }
+
+  const key = process.env.APPYFLOW_GST_KEY
+  if (!key) {
+    return res.status(503).json({ error: 'GST lookup not configured' })
+  }
+
+  try {
+    const { data } = await axios.get('https://appyflow.in/api/verifyGST', {
+      params: { gstNo: gstin, key_secret: key },
+      timeout: 8000,
+    })
+
+    if (data?.error || !data?.taxpayerInfo) {
+      return res.status(404).json({ error: data?.message || 'GSTIN not found' })
+    }
+
+    const info = data.taxpayerInfo
+    const addr = info?.pradr?.addr || {}
+    const composed = [addr.bno, addr.bnm, addr.flno, addr.st, addr.loc, addr.dst, addr.stcd]
+      .filter(Boolean)
+      .join(', ')
+
+    return res.json({
+      success: true,
+      data: {
+        gstin,
+        pan: gstin.slice(2, 12),
+        legalName: info?.lgnm || '',
+        tradeName: info?.tradeNam || '',
+        constitution: info?.ctb || '',
+        status: info?.sts || '',
+        address: info?.pradr?.adr || composed,
+        pincode: addr.pncd || '',
+        state: addr.stcd || '',
+        city: addr.dst || addr.loc || '',
+        country: 'India',
+      },
+    })
+  } catch (err) {
+    console.error('GET /gst-lookup error:', err.response?.data || err.message)
+    return res.status(502).json({ error: 'GST lookup failed' })
+  }
+})
+
+// ─────────────────────────────────────────────
 // GET /customers/org-lookup
 // Query: ?domain=ikea.com&type=buyer
 // Identity from JWT
