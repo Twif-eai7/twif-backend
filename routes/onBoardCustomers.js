@@ -28,12 +28,27 @@ function validCategoryIds(categories = []) {
 }
 
 async function attachOwnerMember({ orgId, userId, email, fullName, jobTitle }) {
+  const normalised = email.toLowerCase().trim()
+  const { data: existing } = await supabase
+    .from('organization_members')
+    .select('id, organization_id, full_name, email, role, user_id')
+    .eq('organization_id', orgId)
+    .eq('email', normalised)
+    .maybeSingle()
+
+  if (existing) {
+    if (!existing.user_id && userId) {
+      await supabase.from('organization_members').update({ user_id: userId }).eq('id', existing.id)
+    }
+    return existing
+  }
+
   const { data: member, error: memberError } = await supabase
     .from('organization_members')
     .insert([{
       organization_id: orgId,
       full_name: fullName,
-      email: email.toLowerCase().trim(),
+      email: normalised,
       role: 'owner',
       user_id: userId,
       job_title: jobTitle || null
@@ -43,6 +58,43 @@ async function attachOwnerMember({ orgId, userId, email, fullName, jobTitle }) {
 
   if (memberError) throw new Error(`Failed to create org member: ${memberError.message}`)
   return member
+}
+
+const MEMBER_WITH_ORG =
+  'id, organization_id, full_name, email, role, user_id, organizations(id, name, display_name, status, type)'
+
+async function findExistingMemberships(userId, email) {
+  const normalised = (email || '').toLowerCase().trim()
+  const [byUser, byEmail] = await Promise.all([
+    userId
+      ? supabase.from('organization_members').select(MEMBER_WITH_ORG).eq('user_id', userId)
+      : Promise.resolve({ data: [] }),
+    normalised
+      ? supabase.from('organization_members').select(MEMBER_WITH_ORG).eq('email', normalised)
+      : Promise.resolve({ data: [] }),
+  ])
+  const map = new Map()
+  for (const row of [...(byUser.data || []), ...(byEmail.data || [])]) {
+    map.set(row.id, row)
+  }
+  return [...map.values()]
+}
+
+function existingApplication(memberships) {
+  const pending = memberships.find(m => m.organizations?.status === 'pending')
+  if (pending) {
+    return { org: pending.organizations, member: pending, alreadyPending: true }
+  }
+  const live = memberships.find(m => {
+    const s = m.organizations?.status
+    return s && s !== 'pending' && s !== 'rejected'
+  })
+  if (live) {
+    const err = new Error('This email is already registered to an organisation. Please sign in.')
+    err.status = 409
+    throw err
+  }
+  return null
 }
 
 // ─────────────────────────────────────────────
@@ -60,20 +112,8 @@ async function createOrgAndOwner({
 }) {
   const normalisedEmail = (orgEmail || email).toLowerCase().trim()
 
-  const { data: existingMember } = await supabase
-    .from('organization_members')
-    .select('id, organization_id, full_name, email, role, organizations(id, name, display_name, status, type)')
-    .eq('user_id', userId)
-    .maybeSingle()
-
-  if (existingMember?.organizations) {
-    if (existingMember.organizations.status === 'pending') {
-      return { org: existingMember.organizations, member: existingMember, alreadyPending: true }
-    }
-    const err = new Error('This email is already registered to an organisation. Please sign in.')
-    err.status = 409
-    throw err
-  }
+  const already = existingApplication(await findExistingMemberships(userId, normalisedEmail))
+  if (already) return already
 
   const { data: orphan } = await supabase
     .from('organizations')

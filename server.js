@@ -36,6 +36,7 @@ const skuItemsRoutes = require('./routes/skuItems')
 const courierLogsRoutes = require('./routes/courierLogs');
 const internationalCourierLogsRoutes = require('./routes/internationalCourierLogs');
 const internalEmailRoutes = require('./routes/internalEmail');
+const authOtpRoutes = require('./routes/authOtp');
 
  
 // --- Environment Variable Validation ---
@@ -120,7 +121,7 @@ app.use('/cron', cronJobsRoutes);
 app.use('/pofiles', pofileRecordsRoutes);
 app.use('/purchase-orders', purchaseOrdersRoutes);
 // app.use('/org-customers', onBoardCustomersRoutes);
-// app.use('/auth', authRoutes);
+app.use('/auth', authOtpRoutes);
 app.use('/webhooks', databaseWebhooks);
 app.use('/suppliers', suppliersRoutes);
 app.use('/org-customers', onBoardCustomersRoutes);
