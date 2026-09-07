@@ -21,12 +21,35 @@ const sendOtpLimiter = rateLimit({
 })
 
 async function findUserByEmail(email) {
-  if (typeof supabase.auth.admin.getUserByEmail === 'function') {
-    const { data, error } = await supabase.auth.admin.getUserByEmail(email)
+  const { data: member } = await supabase
+    .from('organization_members')
+    .select('user_id')
+    .eq('email', email)
+    .not('user_id', 'is', null)
+    .limit(1)
+    .maybeSingle()
+  if (member?.user_id) {
+    const { data } = await supabase.auth.admin.getUserById(member.user_id)
     if (data?.user) return data.user
-    if (error && !/not found|unable to find|user not found/i.test(error.message || '')) {
-      console.warn('getUserByEmail:', error.message)
-    }
+  }
+
+  const { data: portal } = await supabase
+    .from('portal_users')
+    .select('id')
+    .eq('email', email)
+    .maybeSingle()
+  if (portal?.id) {
+    const { data } = await supabase.auth.admin.getUserById(portal.id)
+    if (data?.user) return data.user
+  }
+
+  for (let page = 1; page <= 20; page += 1) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: 200 })
+    if (error) break
+    const users = data?.users || []
+    const found = users.find((u) => (u.email || '').toLowerCase() === email)
+    if (found) return found
+    if (users.length < 200) break
   }
   return null
 }
@@ -105,7 +128,14 @@ router.post('/send-otp', sendOtpLimiter, async (req, res) => {
       return res.status(400).json({ error: 'A valid email is required' })
     }
 
-    await ensureUser(email, shouldCreateUser)
+    if (shouldCreateUser) {
+      await ensureUser(email, true)
+    } else {
+      const existing = await findUserByEmail(email)
+      if (existing && !existing.email_confirmed_at) {
+        await supabase.auth.admin.updateUserById(existing.id, { email_confirm: true })
+      }
+    }
 
     const redirectTo = `${FRONTEND_URL.replace(/\/$/, '')}/auth`
     let { data, error } = await supabase.auth.admin.generateLink({
