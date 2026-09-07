@@ -17,8 +17,172 @@ const phoneUtil = PhoneNumberUtil.getInstance()
 
 const {
   SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN,
-  ADMIN_EMAIL, RESEND_FROM_EMAIL, FRONTEND_URL
+  ADMIN_EMAIL, RESEND_FROM_EMAIL
 } = process.env
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://plm.eai7.com'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function validCategoryIds(categories = []) {
+  return (categories || []).filter(id => typeof id === 'string' && UUID_RE.test(id))
+}
+
+async function attachOwnerMember({ orgId, userId, email, fullName, jobTitle }) {
+  const { data: member, error: memberError } = await supabase
+    .from('organization_members')
+    .insert([{
+      organization_id: orgId,
+      full_name: fullName,
+      email: email.toLowerCase().trim(),
+      role: 'owner',
+      user_id: userId,
+      job_title: jobTitle || null
+    }])
+    .select()
+    .single()
+
+  if (memberError) throw new Error(`Failed to create org member: ${memberError.message}`)
+  return member
+}
+
+// ─────────────────────────────────────────────
+// Helper: create org + owner member
+// Org is created with status = 'pending' — needs super-admin approval
+// ─────────────────────────────────────────────
+async function createOrgAndOwner({
+  userId, email, orgEmail, fullName, jobTitle, orgName, orgType,
+  country, phone, domain, numberOfEmployees,
+  retailerType, supplierType, businessRegistration,
+  categories = [],
+  cin, udyam, msme, isi, iec, bankAccountNumber, bankIfsc,
+  pincode, address, ownerName, ownerEmail, ownerPhone, reasonForContact, logoUrl,
+  ndaAccepted, ndaSignatureName, ndaSignatureType, ndaSignatureImage, ndaIp
+}) {
+  const normalisedEmail = (orgEmail || email).toLowerCase().trim()
+
+  const { data: existingMember } = await supabase
+    .from('organization_members')
+    .select('id, organization_id, full_name, email, role, organizations(id, name, display_name, status, type)')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (existingMember?.organizations) {
+    if (existingMember.organizations.status === 'pending') {
+      return { org: existingMember.organizations, member: existingMember, alreadyPending: true }
+    }
+    const err = new Error('This email is already registered to an organisation. Please sign in.')
+    err.status = 409
+    throw err
+  }
+
+  const { data: orphan } = await supabase
+    .from('organizations')
+    .select('id, name, display_name, status, type')
+    .eq('email', normalisedEmail)
+    .eq('status', 'pending')
+    .eq('type', orgType)
+    .order('created_on', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (orphan?.id) {
+    const member = await attachOwnerMember({
+      orgId: orphan.id, userId, email, fullName, jobTitle
+    })
+    return { org: orphan, member, recovered: true }
+  }
+
+  const websiteDomain = domain ? (() => {
+    try {
+      const host = new URL(domain.startsWith('http') ? domain : `https://${domain}`).hostname
+      return host.replace(/^www\./, '').toLowerCase() || null
+    } catch {
+      return extractDomain(domain)
+    }
+  })() : null
+
+  const orgInsert = {
+    name: orgName,
+    display_name: orgName,
+    type: orgType,
+    email: normalisedEmail,
+    country,
+    phone_no: phone || null,
+    domain: websiteDomain,
+    website: domain || null,
+    no_of_employees: numberOfEmployees || null,
+    no_of_members: 1,
+    status: 'pending'
+  }
+
+  if (orgType === 'supplier') {
+    Object.assign(orgInsert, {
+      zip: pincode || null,
+      address: address || null,
+      owner_name: ownerName || null,
+      owner_email: ownerEmail || null,
+      owner_phone: ownerPhone || null,
+      reason_for_contact: reasonForContact || null,
+      logo_url: logoUrl || null,
+      nda_accepted: !!ndaAccepted,
+      nda_signature_name: ndaSignatureName || null,
+      nda_signature_type: ndaSignatureType || null,
+      nda_signature_image: ndaSignatureImage || null,
+      nda_accepted_at: ndaAccepted ? new Date().toISOString() : null,
+      nda_ip_address: ndaIp || null
+    })
+  }
+
+  const { data: org, error: orgError } = await supabase
+    .from('organizations')
+    .insert([orgInsert])
+    .select()
+    .single()
+
+  if (orgError) throw new Error(`Failed to create organization: ${orgError.message}`)
+
+  if (orgType === 'buyer') {
+    const { error: buyerDetailsError } = await supabase.from('buyer_details').insert([{
+      organization_id: org.id,
+      retailer_type: retailerType || null,
+      no_of_employees: numberOfEmployees || null,
+      website: domain || null,
+    }])
+    if (buyerDetailsError) throw new Error(`Failed to create buyer details: ${buyerDetailsError.message}`)
+  } else if (orgType === 'supplier') {
+    const { error: supplierDetailsError } = await supabase.from('supplier_details').insert([{
+      organization_id: org.id,
+      gst_number: businessRegistration || null,
+      supplier_type: supplierType || null,
+      no_of_employees: numberOfEmployees || null,
+      website: domain || null,
+      cin_no: cin || null,
+      udyam_no: udyam || null,
+      msme_no: msme || null,
+      isi_code: isi || null,
+      iec_code: iec || null,
+      bank_account_number: bankAccountNumber || null,
+      bank_ifsc_code: bankIfsc || null,
+    }])
+    if (supplierDetailsError) throw new Error(`Failed to create supplier details: ${supplierDetailsError.message}`)
+  }
+
+  const member = await attachOwnerMember({
+    orgId: org.id, userId, email, fullName, jobTitle
+  })
+
+  const categoryIds = validCategoryIds(categories)
+  if (orgType === 'supplier' && categoryIds.length > 0) {
+    const { error: categoriesError } = await supabase.from('supplier_categories').insert(
+      categoryIds.map(categoryId => ({ supplier_org_id: org.id, category_id: categoryId }))
+    )
+    if (categoriesError) {
+      console.error('Failed to save supplier categories (org still created):', categoriesError.message)
+    }
+  }
+
+  return { org, member }
+}
 
 // ─────────────────────────────────────────────
 // Free email domains
@@ -81,119 +245,11 @@ async function updateShopifyMetafields(metafieldsPayload) {
 }
 
 // ─────────────────────────────────────────────
-// Helper: create org + owner member
-// Org is created with status = 'pending' — needs super-admin approval
-// ─────────────────────────────────────────────
-async function createOrgAndOwner({
-  userId, email, orgEmail, fullName, jobTitle, orgName, orgType,
-  country, phone, domain, numberOfEmployees,
-  retailerType, supplierType, businessRegistration,
-  categories = [],
-  cin, udyam, msme, isi, iec, bankAccountNumber, bankIfsc,
-  pincode, address, ownerName, ownerEmail, ownerPhone, reasonForContact, logoUrl,
-  ndaAccepted, ndaSignatureName, ndaSignatureType, ndaSignatureImage, ndaIp
-}) {
-  // 1. Create organization — pending until super-admin approves
-  const websiteDomain = domain ? extractDomain(domain) : null
-
-  const orgInsert = {
-    name: orgName,
-    display_name: orgName,
-    type: orgType,
-    email: (orgEmail || email).toLowerCase().trim(),
-    country,
-    phone_no: phone || null,
-    domain: websiteDomain,
-    website: domain || null,
-    no_of_employees: numberOfEmployees || null,
-    no_of_members: 1,
-    status: 'pending'
-  }
-
-  if (orgType === 'supplier') {
-    Object.assign(orgInsert, {
-      zip: pincode || null,
-      address: address || null,
-      owner_name: ownerName || null,
-      owner_email: ownerEmail || null,
-      owner_phone: ownerPhone || null,
-      reason_for_contact: reasonForContact || null,
-      logo_url: logoUrl || null,
-      nda_accepted: !!ndaAccepted,
-      nda_signature_name: ndaSignatureName || null,
-      nda_signature_type: ndaSignatureType || null,
-      nda_signature_image: ndaSignatureImage || null,
-      nda_accepted_at: ndaAccepted ? new Date().toISOString() : null,
-      nda_ip_address: ndaIp || null
-    })
-  }
-
-  const { data: org, error: orgError } = await supabase
-    .from('organizations')
-    .insert([orgInsert])
-    .select()
-    .single()
-
-  if (orgError) throw new Error(`Failed to create organization: ${orgError.message}`)
-
-  // 2. Type-specific details row
-  if (orgType === 'buyer') {
-    const { error: buyerDetailsError } = await supabase.from('buyer_details').insert([{
-      organization_id: org.id,
-      retailer_type: retailerType || null,
-      no_of_employees: numberOfEmployees || null,
-      website: domain || null,
-    }])
-    if (buyerDetailsError) throw new Error(`Failed to create buyer details: ${buyerDetailsError.message}`)
-  } else if (orgType === 'supplier') {
-    const { error: supplierDetailsError } = await supabase.from('supplier_details').insert([{
-      organization_id: org.id,
-      gst_number: businessRegistration || null,
-      supplier_type: supplierType || null,
-      no_of_employees: numberOfEmployees || null,
-      website: domain || null,
-      cin_no: cin || null,
-      udyam_no: udyam || null,
-      msme_no: msme || null,
-      isi_code: isi || null,
-      iec_code: iec || null,
-      bank_account_number: bankAccountNumber || null,
-      bank_ifsc_code: bankIfsc || null,
-    }])
-    if (supplierDetailsError) throw new Error(`Failed to create supplier details: ${supplierDetailsError.message}`)
-    if (categories.length > 0) {
-      const { error: categoriesError } = await supabase.from('supplier_categories').insert(
-        categories.map(categoryId => ({ supplier_org_id: org.id, category_id: categoryId }))
-      )
-      if (categoriesError) throw new Error(`Failed to save supplier categories: ${categoriesError.message}`)
-    }
-  }
- 
-  // 3. Create owner member row
-  const { data: member, error: memberError } = await supabase
-    .from('organization_members')
-    .insert([{
-      organization_id: org.id,
-      full_name: fullName,
-      email: email.toLowerCase().trim(),
-      role: 'owner',
-      user_id: userId,
-      job_title: jobTitle || null
-    }])
-    .select()
-    .single()
- 
-  if (memberError) throw new Error(`Failed to create org member: ${memberError.message}`)
- 
-  return { org, member }
-}
- 
-// ─────────────────────────────────────────────
 // Helper: notify super-admin of a new pending org
 // ─────────────────────────────────────────────
 async function notifyAdminNewOrg(orgData, submitterEmail) {
   try {
-    const dashboardUrl = `${FRONTEND_URL}/dashboard/approvals?tab=orgs`
+    const dashboardUrl = `${FRONTEND_URL}/admin/approvals?tab=orgs`
     await resend.emails.send({
       from: RESEND_FROM_EMAIL,
       to: ADMIN_EMAIL,
@@ -335,7 +391,7 @@ async function sendVendorApplicationCopy({ toEmail, application, signatureName, 
 // ─────────────────────────────────────────────
 async function notifyOrgAdminJoinRequest({ orgAdmin, orgDisplayName, fullName, normalizedEmail, joinRequestId }) {
   try {
-    const dashboardUrl = `${FRONTEND_URL}/dashboard/approvals?tab=members&id=${joinRequestId}`
+    const dashboardUrl = `${FRONTEND_URL}/admin/approvals?tab=requests&id=${joinRequestId}`
     await resend.emails.send({
       from: RESEND_FROM_EMAIL,
       to: orgAdmin.email,
@@ -391,7 +447,7 @@ router.get('/categories', async (req, res) => {
 // ─────────────────────────────────────────────
 const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
 
-router.get('/gst-lookup', requireAuth, async (req, res) => {
+router.get('/gst-lookup', async (req, res) => {
   const gstin = String(req.query.gstin || '').toUpperCase().trim()
 
   if (!GSTIN_RE.test(gstin)) {
@@ -635,7 +691,7 @@ router.post('/claim-org', requireAuth, async (req, res) => {
     if (insertError) throw insertError
 
     const orgDisplayName = org.display_name || org.name
-    const dashboardUrl = `${FRONTEND_URL}/dashboard/approvals?tab=claims&id=${claimRequest.id}`
+    const dashboardUrl = `${FRONTEND_URL}/admin/approvals?tab=requests&id=${claimRequest.id}`
 
     // Notify super-admin
     try {
@@ -1561,7 +1617,7 @@ router.post('/', requireAuth, async (req, res) => {
   try {
     const orgType = customer_role === 'Buyer' ? 'buyer' : 'supplier'
 
-    const { org } = await createOrgAndOwner({
+    const { org, alreadyPending, recovered } = await createOrgAndOwner({
       userId,
       email,
       orgEmail,
@@ -1598,22 +1654,26 @@ router.post('/', requireAuth, async (req, res) => {
       ndaIp: req.ip
     })
 
-    console.log(`✅ Created org ${org.id} (pending) for user ${userId}`)
+    console.log(`✅ Created org ${org.id} (pending) for user ${userId}${alreadyPending ? ' (already pending)' : recovered ? ' (recovered orphan)' : ''}`)
 
-    if (orgType === 'supplier') {
-      // Two separate inserts so Postgres assigns each its own now() — these are
-      // genuinely two distinct events, not one moment duplicated across rows.
-      await supabase.from('nda_activity_log').insert([{
-        organization_id: org.id, event_type: 'created', actor_name: customer_name, actor_email: email, ip_address: req.ip
-      }])
-      await supabase.from('nda_activity_log').insert([{
-        organization_id: org.id, event_type: 'vendor_signed', actor_name: customer_name, actor_email: email, ip_address: req.ip
-      }])
+    if (orgType === 'supplier' && !alreadyPending) {
+      try {
+        await supabase.from('nda_activity_log').insert([{
+          organization_id: org.id, event_type: 'created', actor_name: customer_name, actor_email: email, ip_address: req.ip
+        }])
+        await supabase.from('nda_activity_log').insert([{
+          organization_id: org.id, event_type: 'vendor_signed', actor_name: customer_name, actor_email: email, ip_address: req.ip
+        }])
+      } catch (logErr) {
+        console.error('nda_activity_log insert failed (org still created):', logErr.message)
+      }
     }
 
-    await notifyAdminNewOrg({ ...req.body, email }, email)
+    if (!alreadyPending) {
+      await notifyAdminNewOrg({ ...req.body, email }, email)
+    }
 
-    if (orgType === 'supplier') {
+    if (orgType === 'supplier' && !alreadyPending) {
       const copyResult = await sendVendorApplicationCopy({
         toEmail: email,
         application: req.body,
@@ -1640,7 +1700,12 @@ router.post('/', requireAuth, async (req, res) => {
 
   } catch (err) {
     console.error('POST /customers error:', err.message)
-    return res.status(500).json({ error: 'Failed to create organization', details: err.message })
+    const status = err.status === 409 ? 409 : 500
+    return res.status(status).json({
+      error: status === 409 ? err.message : 'Failed to create organization',
+      details: err.message,
+      ...(status === 409 && err.message?.toLowerCase().includes('already submitted') ? { pending: true } : {}),
+    })
   }
 })
 

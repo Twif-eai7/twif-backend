@@ -15,7 +15,7 @@ const {
 
 const dotenv = require('dotenv')
 dotenv.config()
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173'
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://plm.eai7.com'
 
 function pctError(code, message, details = {}) {
   const err = new Error(message)

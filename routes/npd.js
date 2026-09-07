@@ -20,7 +20,7 @@ const supabase = require('../supabaseClient')
 const upload   = require('../upload')
 
 const NPD_BUCKET = 'npd'
-const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+const frontendUrl = process.env.FRONTEND_URL || 'https://plm.eai7.com'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 

@@ -18,7 +18,7 @@ const { stat } = require('fs')
 const { parseFileRef, buildFileRef, ACTIVE_BUCKET, resolveFileUrl } = require('../helper/storage')
 const PDFDocument = require('pdfkit')
 dotenv.config()
-const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
+const frontendUrl = process.env.FRONTEND_URL || 'https://plm.eai7.com'
 
 // Returns 'buyer' | 'merchant' | null — whether memberId is allowed to act on this
 // workspace's pipeline (approve / status changes). Covers the primary buyer, the
