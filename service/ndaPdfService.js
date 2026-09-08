@@ -210,6 +210,35 @@ function formatIST(date) {
   }) + ' IST'
 }
 
+function dateStampIST(date) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(date || Date.now()))
+  const get = (type) => parts.find((p) => p.type === type)?.value || ''
+  return `${get('year')}${get('month')}${get('day')}`
+}
+
+function partyPrefix(organization) {
+  const type = String(organization?.type || 'supplier').toLowerCase()
+  if (type === 'buyer') return 'CLT'
+  if (type === 'merchant') return 'TWF'
+  return 'VND'
+}
+
+function shortOrgCode(id) {
+  const hex = String(id || '').replace(/-/g, '').toUpperCase().replace(/[^0-9A-F]/g, '')
+  return (hex.slice(-4) || '0000').padStart(4, '0')
+}
+
+/** Stable short ID, e.g. VND-20260908-5720 */
+function buildDocumentId(organization) {
+  const when = organization?.nda_accepted_at || organization?.created_on || new Date()
+  return `${partyPrefix(organization)}-${dateStampIST(when)}-${shortOrgCode(organization?.id)}`
+}
+
 // ─────────────────────────────────────────────
 // Main entry point
 //
@@ -232,7 +261,7 @@ async function buildSignedNdaPdf({ organization, ownerJobTitle, adminSignature, 
   }
 
   const vendorName = organization.display_name || organization.name
-  const docId = organization.id
+  const docId = buildDocumentId(organization)
   const effectiveDate = formatIST(organization.created_on || new Date()).split(',')[0].trim()
 
   // ── Cover page ──────────────────────────────
@@ -387,4 +416,4 @@ async function drawSignatureColumn(doc, page, fonts, opts) {
   }
 }
 
-module.exports = { buildSignedNdaPdf }
+module.exports = { buildSignedNdaPdf, buildDocumentId }
