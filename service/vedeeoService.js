@@ -84,11 +84,22 @@ function toEmbedJoinUrl(joinUrl, displayName) {
   }
 }
 
+function pickRawJoinUrl(invite, role) {
+  if (!invite || typeof invite !== 'object') return null
+  const hostFirst = [
+    invite.hostJoinUrl, invite.embedJoinUrl, invite.guestJoinUrl,
+    invite.notification?.joinUrl, invite.joinUrl,
+  ]
+  const guestFirst = [
+    invite.guestJoinUrl, invite.notification?.joinUrl, invite.embedJoinUrl,
+    invite.hostJoinUrl, invite.joinUrl,
+  ]
+  const list = role === 'host' ? hostFirst : guestFirst
+  return list.find((u) => typeof u === 'string' && u.trim()) || null
+}
+
 function joinUrlForRole(invite, role, displayName) {
-  const raw = role === 'host'
-    ? (invite?.hostJoinUrl || invite?.embedJoinUrl)
-    : (invite?.guestJoinUrl || invite?.notification?.joinUrl || invite?.embedJoinUrl)
-  return toEmbedJoinUrl(raw, displayName)
+  return toEmbedJoinUrl(pickRawJoinUrl(invite, role), displayName)
 }
 
 class VedeeoError extends Error {
@@ -201,6 +212,7 @@ module.exports = {
   isOpenInvite,
   userIsOnInvite,
   toEmbedJoinUrl,
+  pickRawJoinUrl,
   joinUrlForRole,
   createInvite,
   getInvite,

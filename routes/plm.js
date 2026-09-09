@@ -20,6 +20,12 @@ const PDFDocument = require('pdfkit')
 dotenv.config()
 const frontendUrl = process.env.FRONTEND_URL || 'https://plm.eai7.com'
 
+// Warm-up / health check — PLM page hits this on mount so the first real
+// workspace action does not pay Cloud Run cold start. Public on purpose.
+router.get('/ping', (_req, res) => {
+  res.json({ ok: true, service: 'plm' })
+})
+
 // Returns 'buyer' | 'merchant' | null — whether memberId is allowed to act on this
 // workspace's pipeline (approve / status changes). Covers the primary buyer, the
 // merchant who owns it, AND any co-buyer (a second/third buyer who accepted an
