@@ -51,15 +51,16 @@ function isClosed(invite) {
   return ['DECLINED', 'CANCELLED', 'CANCELED', 'EXPIRED', 'ENDED'].includes(s)
 }
 
+function isInviteExpired(invite) {
+  if (!invite?.expiresAt) return false
+  const ts = Date.parse(invite.expiresAt)
+  return !Number.isNaN(ts) && ts <= Date.now()
+}
+
 function isOpenInvite(invite) {
   if (!invite?.inviteId || isClosed(invite)) return false
   if (isAccepted(invite)) return true
-  if (isRinging(invite)) {
-    if (invite?.expiresAt && !Number.isNaN(Date.parse(invite.expiresAt))) {
-      return new Date(invite.expiresAt) > new Date()
-    }
-    return true
-  }
+  if (isRinging(invite)) return !isInviteExpired(invite)
   return false
 }
 
@@ -68,11 +69,24 @@ function userIsOnInvite(invite, userId) {
   return invite.callerUserId === userId || invite.calleeUserId === userId
 }
 
+function hasRoomId(joinUrl) {
+  if (typeof joinUrl !== 'string' || !joinUrl.trim()) return false
+  try {
+    return Boolean(new URL(joinUrl).searchParams.get('roomId'))
+  } catch {
+    return /[?&]roomId=/.test(joinUrl)
+  }
+}
+
 function toEmbedJoinUrl(joinUrl, displayName) {
   if (!joinUrl) return joinUrl
   const name = displayName ? clip(displayName, 80) : ''
   try {
     const url = new URL(joinUrl)
+    // Vedeeo's meeting UI is room.html. embed.html is a name gate and has no token.
+    if (url.pathname.endsWith('/embed.html') || url.pathname === '/embed.html') {
+      url.pathname = url.pathname.replace(/embed\.html$/, 'room.html')
+    }
     url.searchParams.set('embed', '1')
     if (name && !url.searchParams.get('name')) url.searchParams.set('name', name)
     return url.toString()
@@ -87,15 +101,15 @@ function toEmbedJoinUrl(joinUrl, displayName) {
 function pickRawJoinUrl(invite, role) {
   if (!invite || typeof invite !== 'object') return null
   const hostFirst = [
-    invite.hostJoinUrl, invite.embedJoinUrl, invite.guestJoinUrl,
-    invite.notification?.joinUrl, invite.joinUrl,
+    invite.hostJoinUrl, invite.guestJoinUrl, invite.notification?.joinUrl,
+    invite.embedJoinUrl, invite.joinUrl,
   ]
   const guestFirst = [
-    invite.guestJoinUrl, invite.notification?.joinUrl, invite.embedJoinUrl,
-    invite.hostJoinUrl, invite.joinUrl,
+    invite.guestJoinUrl, invite.notification?.joinUrl, invite.hostJoinUrl,
+    invite.embedJoinUrl, invite.joinUrl,
   ]
   const list = role === 'host' ? hostFirst : guestFirst
-  return list.find((u) => typeof u === 'string' && u.trim()) || null
+  return list.find((u) => hasRoomId(u)) || list.find((u) => typeof u === 'string' && u.trim()) || null
 }
 
 function joinUrlForRole(invite, role, displayName) {
@@ -183,6 +197,32 @@ async function cancelInvite(inviteId, userId) {
   }))
 }
 
+async function getRoom(roomId) {
+  if (!roomId) return null
+  try {
+    return await vedeeoFetch(`/api/v1/rooms/${encodeURIComponent(roomId)}`)
+  } catch (err) {
+    if (err.status === 404) return null
+    throw err
+  }
+}
+
+async function roomIsLive(roomId) {
+  const room = await getRoom(roomId)
+  if (!room) return false
+  const status = String(room.status || '').toUpperCase()
+  return !['ENDED', 'EXPIRED', 'CLOSED', 'CANCELLED', 'CANCELED'].includes(status)
+}
+
+async function deleteRoom(roomId) {
+  if (!roomId) return
+  try {
+    await vedeeoFetch(`/api/v1/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' })
+  } catch {
+    /* already gone */
+  }
+}
+
 async function findOpenInvite(conversationId, userId, storedInviteId) {
   let invites = []
   try {
@@ -196,7 +236,27 @@ async function findOpenInvite(conversationId, userId, storedInviteId) {
       if (one) invites.push(one)
     } catch { /* expired / unknown */ }
   }
-  return invites.find(i => isOpenInvite(i) && userIsOnInvite(i, userId)) || null
+  const mine = invites.filter(i => isOpenInvite(i) && userIsOnInvite(i, userId))
+  for (const invite of mine) {
+    if (invite.roomId && await roomIsLive(invite.roomId)) return invite
+  }
+  return null
+}
+
+async function cancelOpenInvites(conversationId, userId, exceptInviteId) {
+  let invites = []
+  try {
+    invites = await listByConversation(conversationId)
+  } catch {
+    return
+  }
+  for (const invite of invites) {
+    if (!invite?.inviteId || invite.inviteId === exceptInviteId) continue
+    if (invite.callerUserId !== userId) continue
+    if (!isRinging(invite) && !isAccepted(invite)) continue
+    try { await cancelInvite(invite.inviteId, userId) } catch { /* already closed */ }
+    await deleteRoom(invite.roomId)
+  }
 }
 
 module.exports = {
@@ -209,17 +269,23 @@ module.exports = {
   isRinging,
   isAccepted,
   isClosed,
+  isInviteExpired,
   isOpenInvite,
   userIsOnInvite,
+  hasRoomId,
   toEmbedJoinUrl,
   pickRawJoinUrl,
   joinUrlForRole,
   createInvite,
   getInvite,
+  getRoom,
+  roomIsLive,
+  deleteRoom,
   listPending,
   listByConversation,
   acceptInvite,
   declineInvite,
   cancelInvite,
   findOpenInvite,
+  cancelOpenInvites,
 }

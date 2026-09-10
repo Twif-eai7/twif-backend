@@ -3946,6 +3946,9 @@ router.post('/sku-workspaces/:id/video-call', async (req, res) => {
     if (existing) {
       if (existing.calleeUserId === memberId && vedeeo.isRinging(existing)) {
         const accepted = await vedeeo.acceptInvite(existing.inviteId, memberId)
+        if (accepted?.roomId && !(await vedeeo.roomIsLive(accepted.roomId))) {
+          return res.status(410).json({ error: 'This video call has ended. Start a new call.' })
+        }
         await persistVideoInvite(id, accepted)
         const comment = await insertVideoCallComment(id, memberId, role, {
           event: 'video_call_accepted',
@@ -3962,6 +3965,8 @@ router.post('/sku-workspaces/:id/video-call', async (req, res) => {
     if (!calleeUserId) {
       return res.status(400).json({ error: 'No other workspace member to call. Invite a buyer or supplier first.' })
     }
+
+    await vedeeo.cancelOpenInvites(id, memberId)
 
     const names = await memberNamesById([memberId, calleeUserId])
     const invite = await vedeeo.createInvite({
@@ -4026,6 +4031,11 @@ router.post('/sku-workspaces/:id/video-call/accept', async (req, res) => {
     if (!resolvedId) return res.status(400).json({ error: 'No ringing invite to accept' })
 
     const accepted = await vedeeo.acceptInvite(resolvedId, memberId)
+    if (accepted?.roomId && !(await vedeeo.roomIsLive(accepted.roomId))) {
+      await vedeeo.deleteRoom(accepted.roomId)
+      await clearVideoInvite(id)
+      return res.status(410).json({ error: 'This video call has ended. Start a new call.' })
+    }
     await persistVideoInvite(id, accepted)
     const role = workspaceChatRole(workspace, memberId)
     const comment = await insertVideoCallComment(id, memberId, role, {
@@ -4189,6 +4199,12 @@ router.post('/sku-workspaces/:id/video-call/end', async (req, res) => {
     const resolvedId = inviteId || workspace?.video_room_name
 
     if (resolvedId && vedeeo.isConfigured()) {
+      try {
+        const invite = await vedeeo.getInvite(resolvedId)
+        if (invite?.roomId) await vedeeo.deleteRoom(invite.roomId)
+      } catch {
+        // invite already gone
+      }
       try {
         await vedeeo.cancelInvite(resolvedId, memberId)
       } catch {
