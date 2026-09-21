@@ -243,7 +243,8 @@ function extractDomain(email) {
 const countryToPhoneCode = {
   'United States': 'US', 'Canada': 'CA', 'United Kingdom': 'GB',
   'Germany': 'DE', 'France': 'FR', 'Australia': 'AU', 'Japan': 'JP',
-  'India': 'IN', 'China': 'CN', 'Brazil': 'BR', 'Mexico': 'MX', 'Other': 'US'
+  'India': 'IN', 'China': 'CN', 'Brazil': 'BR', 'Mexico': 'MX',
+  'Sri Lanka': 'LK', 'Other': 'US'
 }
 
 function validatePhoneNumber(phoneNumber, countryCode) {
@@ -353,11 +354,18 @@ async function sendVendorApplicationCopy({ toEmail, application, signatureName, 
 
           <h3 style="margin-bottom:8px;">Business &amp; compliance details</h3>
           <table style="width:100%;border-collapse:collapse;margin:0 0 20px;font-size:13px;">
+            ${application.country === 'Sri Lanka' ? `
+            ${row('TIN No.', application.business_registration)}
+            ${row('VAT No.', application.cin_no)}
+            ${row('Company Registration No.', application.udyam_no)}
+            ` : `
             ${row('GST No.', application.business_registration)}
             ${row('CIN No.', application.cin_no)}
             ${row('Udyam No.', application.udyam_no)}
             ${row('MSME No.', application.msme_no)}
             ${row('ISI code', application.isi_code)}
+            ${row('IEC code', application.iec_code)}
+            `}
             ${row('Bank account number', application.bank_account_number)}
             ${row('IFSC code', application.bank_ifsc_code)}
             ${row('Address', application.address)}
@@ -1605,9 +1613,7 @@ router.post('/', requireAuth, async (req, res) => {
   }
 
   if (customer_role === 'Supplier/Vendor') {
-    if (!business_registration?.trim()) {
-      return res.status(400).json({ error: 'Missing required field', details: 'GST No. is required for suppliers/vendors' })
-    }
+    const isSriLanka = country === 'Sri Lanka'
     if (via_vendor_entrance) {
       if (!customer_phone?.trim()) {
         return res.status(400).json({ error: 'Missing required field', details: 'Phone is required' })
@@ -1615,6 +1621,21 @@ router.post('/', requireAuth, async (req, res) => {
       if (!job_title?.trim()) {
         return res.status(400).json({ error: 'Missing required field', details: 'Title/Role is required' })
       }
+    }
+    if (!business_registration?.trim()) {
+      return res.status(400).json({
+        error: 'Missing required field',
+        details: isSriLanka ? 'TIN No. is required for suppliers/vendors' : 'GST No. is required for suppliers/vendors',
+      })
+    }
+    if (isSriLanka) {
+      if (!cin_no?.trim()) {
+        return res.status(400).json({ error: 'Missing required field', details: 'VAT No. is required' })
+      }
+      if (!udyam_no?.trim()) {
+        return res.status(400).json({ error: 'Missing required field', details: 'Company Registration No. is required' })
+      }
+    } else if (via_vendor_entrance) {
       if (!iec_code?.trim()) {
         return res.status(400).json({ error: 'Missing required field', details: 'IEC code is required' })
       }
@@ -1627,8 +1648,14 @@ router.post('/', requireAuth, async (req, res) => {
     if (!bank_ifsc_code?.trim()) {
       return res.status(400).json({ error: 'Missing required field', details: 'IFSC code is required for suppliers/vendors' })
     }
-    if (!pincode?.trim() || pincode.trim().length !== 6) {
-      return res.status(400).json({ error: 'Missing required field', details: 'A valid 6-digit pincode is required for suppliers/vendors' })
+    const pinLen = isSriLanka ? 5 : 6
+    if (!pincode?.trim() || pincode.trim().length !== pinLen) {
+      return res.status(400).json({
+        error: 'Missing required field',
+        details: isSriLanka
+          ? 'A valid 5-digit postal code is required for suppliers/vendors'
+          : 'A valid 6-digit pincode is required for suppliers/vendors',
+      })
     }
     if (!address?.trim()) {
       return res.status(400).json({ error: 'Missing required field', details: 'Address is required for suppliers/vendors' })
