@@ -2786,8 +2786,9 @@ const run = async () => {
     const { error: doneErr } = await supabase
       .from('npd2_catalog_uploads')
       .update({
-        status:    'done',
-        sku_count: skusCreated.length,
+        status:           'done',
+        sku_count:        skusCreated.length,
+        slides_processed: done,
         ...(failed.length ? { error_message: `${failed.length} slide(s) failed` } : {}),
       })
       .eq('id', UPLOAD_ID)

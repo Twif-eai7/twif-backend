@@ -4,6 +4,24 @@ const supabase = require('../supabaseClient')
 
 const ALLOWED_BUCKETS = ['POFY26', 'POFY25', 'InvoicesFY26','POFY27']
 
+// Storage folders go buyer → month → day (→ optional nested subfolder) → files, and Supabase
+// Storage's list() only returns one level at a time, so getting a buyer's real PO count means
+// walking every level and summing the leaf (id !== null) entries.
+async function countFilesRecursive(bucket, path) {
+  const { data, error } = await supabase.storage.from(bucket).list(path, { limit: 1000 })
+  if (error || !data) return 0
+
+  // Supabase Storage has no real folders — an empty one is represented by a hidden
+  // .emptyFolderPlaceholder object, which has a real id and would otherwise get counted
+  // as a genuine PO file.
+  const files   = data.filter(i => i.id !== null && i.name !== '.emptyFolderPlaceholder')
+  const folders = data.filter(i => i.id === null)
+  const nestedCounts = await Promise.all(
+    folders.map(f => countFilesRecursive(bucket, `${path}/${f.name}`))
+  )
+  return files.length + nestedCounts.reduce((a, b) => a + b, 0)
+}
+
 router.get('/',async (req, res) => {
   const { bucket, memberId } = req.query
 
@@ -28,6 +46,7 @@ router.get('/',async (req, res) => {
     .from('organizations')
     .select('id, display_name')
     .in('id', orgIds)
+    .order('display_name', { ascending: true })
 
   if (orgsError || !orgs?.length) {
     return res.status(403).json({ error: 'Organizations not found' })
@@ -44,11 +63,14 @@ router.get('/',async (req, res) => {
         .from(bucket)
         .list(safeName, { limit: 1000 })
 
+      const fileCount = await countFilesRecursive(bucket, safeName)
+
       return {
         orgId: org.id,
         displayName: org.display_name,
         basePath: safeName,
-        items: error ? [] : data
+        items: error ? [] : data,
+        fileCount,
       }
     })
   )

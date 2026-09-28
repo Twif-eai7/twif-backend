@@ -28,6 +28,7 @@ const adminRoutes = require('./routes/admin');
 const inspectionScheduleRoutes = require('./routes/inspectionSchedule');
 const npdRoutes = require('./routes/npd');
 const plmRoutes = require('./routes/plm');
+const plmAdminRoutes = require('./routes/plmAdmin');
 const pctRoutes = require('./routes/pct');
 const pofileRecordsRoutes = require('./routes/poFileRecords');
 const travelExpensesroutes = require('./routes/travelExpense');
@@ -68,11 +69,17 @@ const allowedOrigins = [
   "https://www.eai7.com",
 ];
 
+// Any localhost / 127.0.0.1 port is a dev machine — Vite picks 5175+ when
+// 5173/5174 are taken. Explicit list above stays authoritative for prod.
+const isAllowedOrigin = (origin) =>
+  allowedOrigins.includes(origin) ||
+  /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin || "");
+
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true); // allow non-browser tools (e.g. Postman)
-      if (allowedOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         callback(null, true);
       } else {
         console.log(`🚫 CORS blocked origin: ${origin}`);
@@ -81,7 +88,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS","PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-PLM-Master-Key"],
   })
 );
 
@@ -89,7 +96,7 @@ app.use(
 app.options(/.*/, cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) callback(null, true);
+    if (isAllowedOrigin(origin)) callback(null, true);
     else callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
@@ -129,6 +136,7 @@ app.use('/dashboard', dashboardRoutes);
 app.use('/admin', adminRoutes);
 app.use('/npd', npdRoutes);
 app.use('/plm', plmRoutes);
+app.use('/plm/admin', plmAdminRoutes);
 app.use('/pct', pctRoutes);
 app.use('/travel-expenses', travelExpensesroutes);
 app.use('/skus', skuItemsRoutes)

@@ -117,19 +117,51 @@ const buyerOrgToMemberIds = {};
 const allMemberIds = [...new Set(Object.values(buyerOrgToMemberIds).flatMap(s => [...s]))];
 const { data: allMembers } = await supabase
   .from('organization_members')
-  .select('id, full_name, email, role')
+  .select('id, full_name, email, role, department')
   .in('id', allMemberIds);
 
 const memberById = {};
 (allMembers || []).forEach(m => { memberById[m.id] = m; });
 
-// Step E: build membersByBuyerOrg same shape as before
-const membersByBuyerOrg = {};
-Object.entries(buyerOrgToMemberIds).forEach(([buyerOrgId, memberIds]) => {
-  membersByBuyerOrg[buyerOrgId] = [...memberIds]
-    .map(id => memberById[id])
-    .filter(Boolean);
+// Step E: link-specific vs org-wide access maps, for recipient resolution
+// (link access takes priority, org-wide access is the fallback)
+const linkMemberIds = {};
+const orgMemberIds = {};
+(allAccessRows || []).forEach(r => {
+  if (r.buyer_supplier_link_id) {
+    if (!linkMemberIds[r.buyer_supplier_link_id]) linkMemberIds[r.buyer_supplier_link_id] = new Set();
+    linkMemberIds[r.buyer_supplier_link_id].add(r.member_id);
+  } else if (r.organization_id) {
+    if (!orgMemberIds[r.organization_id]) orgMemberIds[r.organization_id] = new Set();
+    orgMemberIds[r.organization_id].add(r.member_id);
+  }
 });
+
+// PI_REMINDER goes only to merchandising members — never admins/owners —
+// scoped to the PO's specific buyer_supplier_link_id, falling back to
+// org-wide access to the buyer org when no link-specific access exists.
+function resolveReminderRecipients(po, buyerOrgId) {
+  let memberIds = linkMemberIds[po.buyer_supplier_link_id];
+  if (!memberIds || memberIds.size === 0) memberIds = orgMemberIds[buyerOrgId];
+  if (!memberIds || memberIds.size === 0) return [];
+
+  return [...memberIds]
+    .map(id => memberById[id])
+    .filter(m => m && m.email && m.department === 'merchandising' && m.role !== 'admin' && m.role !== 'owner');
+}
+
+// PI_OVERDUE goes to the whole merchandising department (including the
+// original reminder recipients, so they see the follow-up too) plus the
+// entire tech department, any role, same link-then-org-fallback resolution.
+function resolveOverdueRecipients(po, buyerOrgId) {
+  let memberIds = linkMemberIds[po.buyer_supplier_link_id];
+  if (!memberIds || memberIds.size === 0) memberIds = orgMemberIds[buyerOrgId];
+  if (!memberIds || memberIds.size === 0) return [];
+
+  return [...memberIds]
+    .map(id => memberById[id])
+    .filter(m => m && m.email && (m.department === 'merchandising' || m.department === 'tech'));
+}
 
     // ── Batch fetch: existing PI_REMINDER / PI_OVERDUE alerts for all POs ──
     const { data: existingReminderAlerts } = await supabase
@@ -160,6 +192,12 @@ Object.entries(buyerOrgToMemberIds).forEach(([buyerOrgId, memberIds]) => {
 
     let totalAlertsCreated = 0;
 
+    // memberId -> { member, pos: [...], alertIds: [...] } — PI_REMINDER and
+    // PI_OVERDUE alerts are each batched into a single digest email per member
+    // after the loop below, instead of one email per PO.
+    const reminderDigestByMember = new Map();
+    const overdueDigestByMember  = new Map();
+
     for (const po of overduePOs) {
       const buyerOrgId       = po.buyer_supplier_links?.buyer_org_id;
       const buyerNameText    = po.buyer_supplier_links?.buyer?.display_name    || 'Unknown Buyer';
@@ -177,64 +215,21 @@ Object.entries(buyerOrgToMemberIds).forEach(([buyerOrgId, memberIds]) => {
       const alertType = daysSinceReceived === 4 ? 'PI_REMINDER' : 'PI_OVERDUE';
 
       // ── Resolve recipients from cache ──
-      const allEligibleMembers = membersByBuyerOrg[buyerOrgId] || [];
+      // PI_REMINDER: merchandising non-admin members, scoped to this PO's
+      // buyer-supplier link (falling back to org-wide buyer-org access).
+      // PI_OVERDUE: merchandising admins/owners plus the whole tech department,
+      // same link-then-org-fallback resolution.
       const recipients = alertType === 'PI_REMINDER'
-        ? allEligibleMembers.filter(m => m.role !== 'admin' && m.role !== 'owner')
-        : allEligibleMembers;
+        ? resolveReminderRecipients(po, buyerOrgId)
+        : resolveOverdueRecipients(po, buyerOrgId);
 
       if (recipients.length === 0) continue;
 
-      // ── If overdue, update existing PI_REMINDER alerts in place ──
-      if (alertType === 'PI_OVERDUE') {
-        const existingReminderIds = alertsByPo[po.id]?.PI_REMINDER || [];
-
-        if (existingReminderIds.length > 0) {
-          const overdueMessage = `PI confirmation overdue for ${buyerNameText} → ${supplierNameText} · PO#${po.po_number}. Please state reason for delay on dashboard.`;
-
-          const { error: updateError } = await supabase
-            .from('alerts')
-            .update({
-              alert_type: 'PI_OVERDUE',
-              message:    overdueMessage,
-              is_read:    false,
-              email_sent: false,
-            })
-            .in('id', existingReminderIds);
-
-          if (updateError) {
-            console.error(`❌ Update error for PO ${po.po_number}:`, updateError);
-            continue;
-          }
-
-          console.log(`🔄 Updated ${existingReminderIds.length} PI_REMINDER → PI_OVERDUE for PO ${po.po_number}`);
-
-          sendAlertEmail(
-            recipients.map(m => ({ email: m.email, name: m.full_name })),
-            overdueMessage,
-            { buyer_name: buyerNameText, supplier_name: supplierNameText, po_number: po.po_number, date: po.po_received_date, days_since: daysSinceReceived },
-            'PI_OVERDUE'
-          ).then(async () => {
-            const { error } = await supabase
-              .from('alerts')
-              .update({ email_sent: true })
-              .in('id', existingReminderIds);
-            if (error) console.error('❌ Email flag update failed:', error);
-          }).catch(err => {
-            console.error(`❌ Overdue email failed for PO ${po.po_number}:`, err);
-          });
-
-          totalAlertsCreated += existingReminderIds.length;
-          continue; // skip insert
-        }
-      }
-
-      // ── For PI_REMINDER, skip if already sent ──
-      if (alertType === 'PI_REMINDER') {
-        const alreadySent = (alertsByPo[po.id]?.PI_REMINDER || []).length > 0;
-        if (alreadySent) {
-          console.log(`ℹ️ PI_REMINDER already sent for PO ${po.po_number} — skipping`);
-          continue;
-        }
+      // ── Skip if this PO already got this alert type ──
+      const alreadySent = (alertsByPo[po.id]?.[alertType] || []).length > 0;
+      if (alreadySent) {
+        console.log(`ℹ️ ${alertType} already sent for PO ${po.po_number} — skipping`);
+        continue;
       }
 
       // ── Resolve snapshot from cache ──
@@ -282,27 +277,71 @@ Object.entries(buyerOrgToMemberIds).forEach(([buyerOrgId, memberIds]) => {
       totalAlertsCreated += insertedAlerts?.length || 0;
       console.log(`✅ ${alertType} alerts created for PO ${po.po_number}`);
 
-      // ── Send email (fire and forget) ──
+      // ── Queue into each recipient's digest instead of emailing now ──
+      const digestByMember = alertType === 'PI_REMINDER' ? reminderDigestByMember : overdueDigestByMember;
+      const alertIdsByMember = new Map(insertedAlerts.map(a => [a.recipient_user_id, a.id]));
+
+      for (const m of recipients) {
+        if (!digestByMember.has(m.id)) {
+          digestByMember.set(m.id, { member: m, pos: [], alertIds: [] });
+        }
+        const entry = digestByMember.get(m.id);
+        entry.pos.push({
+          buyer_name:    buyerNameText,
+          supplier_name: supplierNameText,
+          po_number:     po.po_number,
+          date:          po.po_received_date,
+          days_since:    daysSinceReceived,
+        });
+        const alertId = alertIdsByMember.get(m.id);
+        if (alertId) entry.alertIds.push(alertId);
+      }
+    }
+
+    // ── Flush digests: one summary email per member per alert type ──
+    for (const { member, pos, alertIds } of reminderDigestByMember.values()) {
+      const digestMessage = pos.length === 1
+        ? `PI confirmation due tomorrow for ${pos[0].buyer_name} → ${pos[0].supplier_name} · PO#${pos[0].po_number}. Today is the last day to confirm.`
+        : `${pos.length} POs need PI confirmation tomorrow — today is the last day to confirm.`;
+
       sendAlertEmail(
-        recipients.map(m => ({ email: m.email, name: m.full_name })),
-        alertMessage,
-        {
-          buyer_name:       buyerNameText,
-          supplier_name:    supplierNameText,
-          po_number:        po.po_number,
-          date:             po.po_received_date,
-          days_since:       daysSinceReceived,
-        },
-        alertType
+        [{ email: member.email, name: member.full_name }],
+        digestMessage,
+        { pos },
+        'PI_REMINDER_DIGEST'
       ).then(async () => {
+        if (alertIds.length === 0) return;
         const { error } = await supabase
           .from('alerts')
           .update({ email_sent: true })
-          .in('id', insertedAlerts.map(a => a.id));
-        if (error) console.error('❌ Email flag update failed:', error);
-        console.log(`📧 ${alertType} email sent for PO ${po.po_number}`);
+          .in('id', alertIds);
+        if (error) console.error('❌ Reminder digest email flag update failed:', error);
+        console.log(`📧 PI_REMINDER digest sent to ${member.email} (${pos.length} POs)`);
       }).catch(err => {
-        console.error(`❌ Email failed for PO ${po.po_number}:`, err);
+        console.error(`❌ Reminder digest email failed for ${member.email}:`, err);
+      });
+    }
+
+    for (const { member, pos, alertIds } of overdueDigestByMember.values()) {
+      const digestMessage = pos.length === 1
+        ? `PI confirmation overdue for ${pos[0].buyer_name} → ${pos[0].supplier_name} · PO#${pos[0].po_number}. Please state reason for delay on dashboard.`
+        : `${pos.length} POs have overdue PI confirmations — please review on the dashboard.`;
+
+      sendAlertEmail(
+        [{ email: member.email, name: member.full_name }],
+        digestMessage,
+        { pos },
+        'PI_OVERDUE_DIGEST'
+      ).then(async () => {
+        if (alertIds.length === 0) return;
+        const { error } = await supabase
+          .from('alerts')
+          .update({ email_sent: true })
+          .in('id', alertIds);
+        if (error) console.error('❌ Overdue digest email flag update failed:', error);
+        console.log(`📧 PI_OVERDUE digest sent to ${member.email} (${pos.length} POs)`);
+      }).catch(err => {
+        console.error(`❌ Overdue digest email failed for ${member.email}:`, err);
       });
     }
 
@@ -314,6 +353,139 @@ Object.entries(buyerOrgToMemberIds).forEach(([buyerOrgId, memberIds]) => {
 
   } catch (err) {
     console.error('❌ PI reminder cron error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/* =========================
+   POST /cron/upload-alerts-digest
+   Runs once/day. PO_UPLOAD and PI_UPLOAD alerts are inserted in real time
+   by the databaseWebhooks routes with email_sent=false; this sweep batches
+   today's (IST) alerts into one digest email per recipient per alert type,
+   instead of emailing on every single upload. Deliberately not a backlog
+   processor — anything older than today, or with no resolvable recipient,
+   is marked resolved without emailing rather than retried.
+========================= */
+router.post('/upload-alerts-digest', async (req, res) => {
+  const secret = req.headers['x-cron-secret'];
+  if (secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    let digestsSent = 0;
+
+    // "Today" in IST, matching the pi-reminder cron's day boundary — the
+    // digest only ever covers alerts created since this run's calendar day
+    // started. Nothing older is ever included or retried.
+    const now = new Date();
+    const todayStartIST = new Date(
+      new Date(now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })).getTime() - (5.5 * 60 * 60 * 1000)
+    ).toISOString();
+
+    for (const alertType of ['PO_UPLOAD', 'PI_UPLOAD']) {
+      const { data: allPending, error: fetchError } = await supabase
+        .from('alerts')
+        .select('id, recipient_user_id, po_snapshot, created_at')
+        .eq('alert_type', alertType)
+        .eq('email_sent', false);
+
+      if (fetchError) {
+        console.error(`❌ Fetch pending ${alertType} alerts error:`, fetchError);
+        continue;
+      }
+      if (!allPending?.length) continue;
+
+      const pendingAlerts = allPending.filter(a => a.created_at >= todayStartIST);
+      const staleAlertIds = allPending.filter(a => a.created_at < todayStartIST).map(a => a.id);
+
+      if (staleAlertIds.length > 0) {
+        console.warn(`⚠️ ${staleAlertIds.length} ${alertType} alerts predate today — dropping without emailing (no backlog by design)`);
+        const { error } = await supabase
+          .from('alerts')
+          .update({ email_sent: true })
+          .in('id', staleAlertIds);
+        if (error) console.error(`❌ Stale ${alertType} alert cleanup failed:`, error);
+      }
+
+      if (!pendingAlerts.length) continue;
+
+      const memberIds = [...new Set(pendingAlerts.map(a => a.recipient_user_id))];
+      const { data: members } = await supabase
+        .from('organization_members')
+        .select('id, full_name, email')
+        .in('id', memberIds);
+
+      const memberById = {};
+      (members || []).forEach(m => { memberById[m.id] = m; });
+
+      // recipient_user_id -> { member, pos: [...], alertIds: [...] }
+      const byMember = new Map();
+      const orphanedAlertIds = [];
+      for (const alert of pendingAlerts) {
+        const member = memberById[alert.recipient_user_id];
+        if (!member?.email) {
+          // Recipient no longer resolves to a real, emailable member (deleted
+          // member, missing email, etc.) — mark it resolved instead of
+          // leaving it to resurface on every future run forever.
+          orphanedAlertIds.push(alert.id);
+          continue;
+        }
+
+        if (!byMember.has(member.id)) byMember.set(member.id, { member, pos: [], alertIds: [] });
+        const entry = byMember.get(member.id);
+        entry.pos.push({
+          po_number:     alert.po_snapshot?.po_number,
+          buyer_name:    alert.po_snapshot?.buyer_name,
+          supplier_name: alert.po_snapshot?.supplier_name,
+          date:          alert.po_snapshot?.po_received_date,
+        });
+        entry.alertIds.push(alert.id);
+      }
+
+      if (orphanedAlertIds.length > 0) {
+        console.warn(`⚠️ ${orphanedAlertIds.length} ${alertType} alerts have no resolvable recipient — marking sent without emailing`);
+        const { error } = await supabase
+          .from('alerts')
+          .update({ email_sent: true })
+          .in('id', orphanedAlertIds);
+        if (error) console.error(`❌ Orphaned ${alertType} alert cleanup failed:`, error);
+      }
+
+      const digestType = alertType === 'PO_UPLOAD' ? 'PO_UPLOAD_DIGEST' : 'PI_UPLOAD_DIGEST';
+      const noun        = alertType === 'PO_UPLOAD' ? 'POs' : 'PIs';
+
+      for (const { member, pos, alertIds } of byMember.values()) {
+        const digestMessage = pos.length === 1
+          ? (alertType === 'PO_UPLOAD'
+              ? `PO received for ${pos[0].buyer_name} → ${pos[0].supplier_name} · PO#${pos[0].po_number}`
+              : `PI uploaded for ${pos[0].buyer_name} → ${pos[0].supplier_name} · PO#${pos[0].po_number}`)
+          : `${pos.length} ${noun} uploaded today`;
+
+        sendAlertEmail(
+          [{ email: member.email, name: member.full_name }],
+          digestMessage,
+          { pos },
+          digestType
+        ).then(async () => {
+          const { error } = await supabase
+            .from('alerts')
+            .update({ email_sent: true })
+            .in('id', alertIds);
+          if (error) console.error(`❌ ${digestType} email flag update failed:`, error);
+          console.log(`📧 ${digestType} sent to ${member.email} (${pos.length} ${noun})`);
+        }).catch(err => {
+          console.error(`❌ ${digestType} email failed for ${member.email}:`, err);
+        });
+
+        digestsSent++;
+      }
+    }
+
+    return res.status(200).json({ success: true, digests_sent: digestsSent });
+
+  } catch (err) {
+    console.error('❌ Upload alerts digest cron error:', err);
     return res.status(500).json({ error: err.message });
   }
 });

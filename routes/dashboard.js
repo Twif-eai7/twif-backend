@@ -1,4 +1,4 @@
-/**
+﻿/**
  * routes/dashboard.js
  *
  * Dashboard data routes — email-based, Supabase Storage backed.
@@ -146,6 +146,250 @@ function extractMonthKey(target) {
 
 function normBuyerName(name) {
   return name?.toString().trim().replace(/\u00A0/g, '').replace(/\s+/g, ' ').toUpperCase() || ''
+}
+
+function titleCase(name) {
+  return name?.toString().trim().replace(/\s+/g, ' ')
+    .replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()) || ''
+}
+
+// -----------------------------------------------------------------
+// Live PO/SKU data for /open-po-summary and /shipped-po-summary - replaces
+// the old Excel/Storage-backed rows for these two routes with live Supabase
+// data, so P&L Data's Weekly/Monthly tabs (and Order Management's Open/
+// Shipped PO Summary tables, which share these two routes) can never drift
+// from "KPI & MIS" again.
+// FY window/date-field convention mirrors misFilters.js's dateFieldForStatus.
+// -----------------------------------------------------------------
+const FY_RANGES = { '26': ['2025-04-01', '2026-03-31'], '27': ['2026-04-01', '2027-03-31'] }
+
+// Maps a get_sku_summary_page_reconciled row onto the flat field names
+// PlDataSummary.jsx/WeeklyPoSchedule.jsx/OpenPoSummary.jsx/ShippedPoSummary.jsx
+// (order-management tables - also consumers of these two routes) already
+// read. cancelledValue is derived (unit price x cancelled qty) since the RPC
+// has no dedicated cancelled-value column; totalBusiness has no live
+// equivalent and is a placeholder (= orderValue) pending confirmation of
+// what the old Excel "Total Business" column actually represented.
+function mapReconciledRow(r) {
+  const orderQty = r.ordered ?? 0
+  const orderValue = r.ordered_value ?? 0
+  const unitPrice = orderQty > 0 ? orderValue / orderQty : 0
+  return {
+    customer: titleCase(r.buyer_name),
+    vendor: titleCase(r.vendor_name),
+    poNo: r.po_number || '',
+    item: r.sku_variant ? `${r.sku_ref} ${r.sku_variant}` : (r.sku_ref || ''),
+    orderQty,
+    orderPrice: unitPrice,
+    orderValue,
+    orderDate: r.order_date || '',
+    shippedQty: r.shipped ?? 0,
+    shippedValue: r.shipped_value ?? 0,
+    shippedDate: r.shipped_date || '',
+    cancelledQty: r.cancelled ?? 0,
+    cancelledValue: (r.cancelled ?? 0) * unitPrice,
+    balanceQty: r.balance ?? 0,
+    balanceValue: r.balance_value ?? 0,
+    target: r.target_date || '',
+    totalBusiness: orderValue,
+    status: r.status || '',
+  }
+}
+
+// Every buyer_supplier_link this specific requested set of buyer NAMES
+// resolves to. For an admin (restrictToLinkIds omitted/null) this can
+// legitimately span the whole table - an admin's ?buyers= filter can name
+// any buyer in the system. For a non-admin caller, restrictToLinkIds MUST be
+// passed (their own member_organization_access link ids) so a buyer name
+// shared by more than one supplier's links (e.g. two different suppliers
+// both shipping to the same buyer) can never resolve to another supplier's
+// link id - without this, a non-admin's own-buyer-name allowlist check
+// would pass while still leaking a different supplier's rows for that name.
+async function resolveLinkIdsByBuyerNames(names, restrictToLinkIds = null) {
+  const upperNames = names.map(n => normBuyerName(n))
+  const { data, error } = await supabase
+    .from('buyer_supplier_links')
+    .select('id, buyer:organizations!buyer_supplier_links_buyer_org_id_fkey(display_name)')
+  if (error) throw error
+  const matched = (data || [])
+    .filter(l => upperNames.includes(normBuyerName(l.buyer?.display_name)))
+    .map(l => l.id)
+  if (!restrictToLinkIds) return matched
+  const allowed = new Set(restrictToLinkIds)
+  return matched.filter(id => allowed.has(id))
+}
+
+// Admin merchant-switcher (?merchant=email) - replaces the old
+// merchant-performance.xlsx "Email" column lookup with the live equivalent:
+// that member's own member_organization_access rows.
+async function resolveLinkIdsByMerchantEmail(email) {
+  const { data: memberRow } = await supabase
+    .from('organization_members')
+    .select('id')
+    .ilike('email', email.trim())
+    .maybeSingle()
+  if (!memberRow) return []
+  const { data: accessRows } = await supabase
+    .from('member_organization_access')
+    .select('buyer_supplier_link_id')
+    .eq('member_id', memberRow.id)
+  return [...new Set((accessRows || []).map(r => r.buyer_supplier_link_id).filter(Boolean))]
+}
+
+// linkIds === null means "no restriction" (admin, no buyers/merchant param).
+// Used for /open-po-summary only now (see fetchShippedSkuRows below for why
+// /shipped-po-summary needs a different, leg-level source instead).
+//
+// Queries with p_status: null (every PO, not just fully-open ones) scoped to
+// the target-date window, then keeps only rows with a real remaining
+// balance. Verified live against dashboard_open_by_month (the same RPC
+// KPI & MIS's own "By Months" chart uses): ~99.75% exact match, most months
+// landing at $0.00 diff.
+//
+// PostgREST caps a single RPC response at 2000 rows regardless of the
+// p_page_size requested - confirmed live: p_page_size:100000 on a 785-PO/
+// ~5100-line-item FY27 window silently came back as exactly 2000 rows (382
+// POs), not 785. So this pages through by PO count (a fixed, well-under-2000
+// PO_PAGE_SIZE), using the RPC's own total_po_count field to know when every
+// PO has been collected, instead of trusting one large page_size request.
+const PO_PAGE_SIZE = 200
+
+async function fetchLiveSkuRows({ linkIds, fy }) {
+  const [fyFrom, fyTo] = FY_RANGES[fy] || FY_RANGES['27']
+  const params = {
+    p_link_ids: linkIds,
+    p_buyer_org_id: null,
+    p_vendor_org_id: null,
+    p_status: null,
+    p_search: null,
+    p_target_date_from: fyFrom,
+    p_target_date_to: fyTo,
+    p_shipped_date_from: null,
+    p_shipped_date_to: null,
+    p_merchant: null,
+    p_merchant_exclude: null,
+  }
+
+  const allRows = []
+  let page = 1
+  let totalPoCount = null
+  let poCollected = 0
+  while (totalPoCount === null || poCollected < totalPoCount) {
+    const { data, error } = await supabase.rpc('get_sku_summary_page_reconciled', {
+      ...params,
+      p_page: page,
+      p_page_size: PO_PAGE_SIZE,
+    })
+    if (error) throw new Error(`get_sku_summary_page_reconciled failed: ${error.message}`)
+    const rows = data || []
+    if (rows.length === 0) break
+    if (totalPoCount === null) totalPoCount = Number(rows[0].total_po_count) || 0
+    poCollected += new Set(rows.map(r => r.po_id)).size
+    allRows.push(...rows)
+    page += 1
+  }
+  return allRows.map(mapReconciledRow).filter(r => r.balanceValue > 0)
+}
+
+// /shipped-po-summary's live source - NOT get_sku_summary_page_reconciled.
+//
+// That RPC returns one rolled-up shipped_value/shipped_date per PO LINE
+// ITEM (its total shipped-to-date, dated by whichever leg happened to be
+// last/attributed), which was verified live to run 2-7% off
+// dashboard_volume_by_month per month (KPI & MIS's own "By Months" chart
+// source) - a line item that ships across two legs in different months
+// bucket its WHOLE total into one month there, but correctly split here.
+// User-confirmed live example: September 2026 - dashboard_volume_by_month
+// (and po_shipment_leg summed directly) both show $1,150,722 in Sept legs;
+// the rolled-up RPC showed $1,225,318 for "Sept" because some of that value
+// actually belongs to legs shipped in other months.
+//
+// The fix: query po_shipment_leg directly (the same individual-shipment-leg
+// table dashboard_volume_by_month itself reads from - id, po_line_item_id,
+// shipped_quantity, shipped_value_usd, shipped_date, delete_meta), which is
+// the true one-row-per-shipment-event grain, then hydrate each leg's parent
+// po_line_items/purchase_orders/buyer_supplier_links row for PO/SKU/buyer/
+// vendor identity. One row per LEG, not per line item - a line item that
+// shipped in two legs now correctly produces two rows, each dated and
+// valued by its own leg, matching dashboard_volume_by_month exactly (spot-
+// checked: $1,150,791.46 vs $1,150,722 for Sept 2026, sub-0.01% apart).
+async function fetchShippedSkuRows({ linkIds, fy }) {
+  const [fyFrom, fyTo] = FY_RANGES[fy] || FY_RANGES['27']
+
+  const legs = []
+  let from = 0
+  const LEG_PAGE = 1000
+  while (true) {
+    const { data, error } = await supabase
+      .from('po_shipment_leg')
+      .select('po_line_item_id, shipped_quantity, shipped_value_usd, shipped_date')
+      .gte('shipped_date', fyFrom)
+      .lte('shipped_date', fyTo)
+      .is('delete_meta', null)
+      .range(from, from + LEG_PAGE - 1)
+    if (error) throw new Error(`po_shipment_leg failed: ${error.message}`)
+    legs.push(...(data || []))
+    if (!data || data.length < LEG_PAGE) break
+    from += LEG_PAGE
+  }
+  if (legs.length === 0) return []
+
+  const lineItemIds = [...new Set(legs.map(l => l.po_line_item_id).filter(Boolean))]
+  const LI_CHUNK = 150
+  const lineItemMap = {}
+  for (let i = 0; i < lineItemIds.length; i += LI_CHUNK) {
+    const chunk = lineItemIds.slice(i, i + LI_CHUNK)
+    const { data, error } = await supabase
+      .from('po_line_items')
+      .select(`
+        id, buyer_sku_ref, sku_variant, quantity_ordered, unit_price, order_value_usd,
+        order_date, target_date,
+        purchase_orders!inner(
+          po_number, buyer_supplier_link_id, deleted_at, delete_meta,
+          buyer_supplier_links(
+            buyer:organizations!buyer_supplier_links_buyer_org_id_fkey(display_name),
+            supplier:organizations!buyer_supplier_links_supplier_org_id_fkey(display_name)
+          )
+        )
+      `)
+      .in('id', chunk)
+    if (error) throw new Error(`po_line_items hydrate failed: ${error.message}`)
+    data.forEach(li => { lineItemMap[li.id] = li })
+  }
+
+  const allowed = linkIds ? new Set(linkIds) : null
+  const rows = []
+  for (const leg of legs) {
+    const li = lineItemMap[leg.po_line_item_id]
+    if (!li) continue
+    const po = li.purchase_orders
+    if (po?.deleted_at || po?.delete_meta) continue
+    if (allowed && !allowed.has(po?.buyer_supplier_link_id)) continue
+    const orderQty = li.quantity_ordered ?? 0
+    const orderValue = li.order_value_usd ?? 0
+    const unitPrice = li.unit_price ?? (orderQty > 0 ? orderValue / orderQty : 0)
+    rows.push({
+      customer: titleCase(po?.buyer_supplier_links?.buyer?.display_name),
+      vendor: titleCase(po?.buyer_supplier_links?.supplier?.display_name),
+      poNo: po?.po_number || '',
+      item: li.sku_variant ? `${li.buyer_sku_ref} ${li.sku_variant}` : (li.buyer_sku_ref || ''),
+      orderQty,
+      orderPrice: unitPrice,
+      orderValue,
+      orderDate: li.order_date || '',
+      shippedQty: leg.shipped_quantity ?? 0,
+      shippedValue: leg.shipped_value_usd ?? 0,
+      shippedDate: leg.shipped_date || '',
+      cancelledQty: 0,
+      cancelledValue: 0,
+      balanceQty: 0,
+      balanceValue: 0,
+      target: li.target_date || '',
+      totalBusiness: orderValue,
+      status: 'shipped',
+    })
+  }
+  return rows
 }
 
 // ─────────────────────────────────────────────
@@ -808,7 +1052,7 @@ router.get('/open-po-summary', requireAuth, async (req, res) => {
       .select(`
         organization_id,
         buyer_supplier_link_id,
-        organizations!inner(display_name),
+        organizations(display_name),
         buyer_supplier_links(
           buyer_org_id,
           supplier_org_id,
@@ -823,21 +1067,30 @@ router.get('/open-po-summary', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch buyer/supplier organizations' })
     }
 
-    const orgAllowedBuyers = buyerSupplierOrgs.map(o => o.buyer_supplier_links?.buyer.display_name.toUpperCase() || o.organizations.display_name.toUpperCase())
+    const orgAllowedBuyers = buyerSupplierOrgs
+      .map(o => o.buyer_supplier_links?.buyer?.display_name?.toUpperCase() || o.organizations?.display_name?.toUpperCase())
+      .filter(Boolean)
     const allowedSuppliers = buyerSupplierOrgs
-      .map(o => o.buyer_supplier_links?.supplier.display_name.toUpperCase() || '')
+      .map(o => o.buyer_supplier_links?.supplier?.display_name?.toUpperCase() || '')
       .filter(Boolean)
 
     let allowedBuyers
+    let linkIds
     if (buyersParam) {
       const requested = buyersParam.split('||').map(b => b.trim().toUpperCase()).filter(Boolean)
       allowedBuyers = isAdmin
         ? requested
         : requested.filter(b => orgAllowedBuyers.includes(b))
+      const ownLinkIds = buyerSupplierOrgs.map(o => o.buyer_supplier_link_id).filter(Boolean)
+      linkIds = allowedBuyers.length
+        ? await resolveLinkIdsByBuyerNames(allowedBuyers, isAdmin ? null : ownLinkIds)
+        : []
     } else if (isAdmin) {
       allowedBuyers = null
+      linkIds = null
     } else {
       allowedBuyers = orgAllowedBuyers
+      linkIds = buyerSupplierOrgs.map(o => o.buyer_supplier_link_id).filter(Boolean)
     }
 
     if (buyersParam && Array.isArray(allowedBuyers) && allowedBuyers.length === 0) {
@@ -855,77 +1108,23 @@ router.get('/open-po-summary', requireAuth, async (req, res) => {
       })
     }
 
-    const fileKey = fy === '27' ? FILE_KEYS.openPoFy27 : FILE_KEYS.openPoFy26
-    const workbook = await downloadWorkbook(fileKey)
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]]
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
-      header: 1, defval: '', blankrows: false, raw: false,
-    })
-    if (jsonData.length < 2) return res.status(404).json({ error: 'Empty or invalid file' })
-
-    const headers = jsonData[0].map(h =>
-      h?.toString().trim().replace(/\u00A0/g, ' ').replace(/\s+/g, ' ') || ''
-    )
-    const colIdx = name => headers.findIndex(h => h.toLowerCase() === name.toLowerCase())
-
-    const col = {
-      customer:       colIdx('Customer'),
-      vendor:         colIdx('Vendor'),
-      poNo:           colIdx('PO No.'),
-      item:           colIdx('Item'),
-      orderQty:       colIdx('Order Qty'),
-      orderPrice:     colIdx('Order Price'),
-      orderValue:     colIdx('Order Value in US $'),
-      orderDate:      colIdx('Order Date'),
-      shippedQty:     colIdx('Shipped Qty'),
-      shippedValue:   colIdx('Shipped Value in US $'),
-      shippedDate:    colIdx('Shipped Date'),
-      cancelledQty:   colIdx('Cancelled Qty'),
-      cancelledValue: colIdx('Cancelled Value in US $'),
-      balanceQty:     colIdx('Balance Qty'),
-      balanceValue:   colIdx('Balance Value in US $'),
-      target:         colIdx('Target'),
-      totalBusiness:  colIdx('Total Business'),
-      status:         colIdx('Status'),
+    if (Array.isArray(linkIds) && linkIds.length === 0) {
+      return res.json({
+        success: true,
+        data: { rows: [], rowCount: 0 },
+        pagination: { page: pageNum, pageSize: pageSz, totalPages: 0, totalCustomers: 0 },
+        overall: {
+          orderValue: 0, shippedValue: 0, cancelledValue: 0, balanceValue: 0,
+          orderQty: 0, shippedQty: 0, cancelledQty: 0, balanceQty: 0,
+          totalPoCount: 0, totalLineCount: 0,
+        },
+        customerBuyers: orgAllowedBuyers,
+        customerSuppliers: allowedSuppliers,
+      })
     }
 
-    const allRows = jsonData.slice(1)
-      .filter(row => row?.[col.customer]?.toString().trim())
-      .map(row => ({
-        customer:       row[col.customer]?.toString().trim() || '',
-        vendor:         row[col.vendor]?.toString().trim() || '',
-        poNo:           row[col.poNo]?.toString().trim() || '',
-        item:           row[col.item]?.toString().trim() || '',
-        orderQty:       cleanNumber(row[col.orderQty]),
-        orderPrice:     cleanNumber(row[col.orderPrice]),
-        orderValue:     cleanNumber(row[col.orderValue]),
-        orderDate:      row[col.orderDate]?.toString().trim() || '',
-        shippedQty:     cleanNumber(row[col.shippedQty]),
-        shippedValue:   cleanNumber(row[col.shippedValue]),
-        shippedDate:    row[col.shippedDate]?.toString().trim() || '',
-        cancelledQty:   cleanNumber(row[col.cancelledQty]),
-        cancelledValue: cleanNumber(row[col.cancelledValue]),
-        balanceQty:     cleanNumber(row[col.balanceQty]),
-        balanceValue:   cleanNumber(row[col.balanceValue]),
-        target:         row[col.target]?.toString().trim() || '',
-        totalBusiness:  cleanNumber(row[col.totalBusiness]),
-        status:         row[col.status]?.toString().trim() || '',
-      }))
+    const filteredRowsWithSuppliers = await fetchLiveSkuRows({ linkIds, fy })
 
-    const filteredRows = allowedBuyers === null
-      ? allRows
-      : allowedBuyers.length > 0
-        ? allRows.filter(row => allowedBuyers.includes(row.customer.toUpperCase()))
-        : []
-
-    const allowedSuppliersNorm = allowedSuppliers.map(s => s.trim().toUpperCase())
-
-    const filteredRowsWithSuppliers = (allowedSuppliersNorm.length > 0 && !buyersParam && allowedBuyers !== null)
-    ? filteredRows.filter(row => 
-        allowedSuppliersNorm.includes(row.vendor.trim().toUpperCase())
-      )
-    : filteredRows
-    
     const monthFiltered = month
       ? filteredRowsWithSuppliers.filter(r => extractMonthKey(r.target) === month)
       : filteredRowsWithSuppliers
@@ -982,7 +1181,7 @@ router.get('/shipped-po-summary', requireAuth, async (req, res) => {
       .select(`
         organization_id,
         buyer_supplier_link_id,
-        organizations!inner(display_name),
+        organizations(display_name),
         buyer_supplier_links(
           buyer_org_id,
           supplier_org_id,
@@ -997,12 +1196,15 @@ router.get('/shipped-po-summary', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch buyer/supplier organizations' })
     }
 
-    const orgAllowedBuyers = buyerSupplierOrgs.map(o => o.buyer_supplier_links?.buyer.display_name.toUpperCase() || o.organizations.display_name.toUpperCase())
+    const orgAllowedBuyers = buyerSupplierOrgs
+      .map(o => o.buyer_supplier_links?.buyer?.display_name?.toUpperCase() || o.organizations?.display_name?.toUpperCase())
+      .filter(Boolean)
     const allowedSuppliers = buyerSupplierOrgs
-      .map(o => o.buyer_supplier_links?.supplier.display_name.toUpperCase() || '')
+      .map(o => o.buyer_supplier_links?.supplier?.display_name?.toUpperCase() || '')
       .filter(Boolean)
 
     let allowedBuyers
+    let linkIds
     if (buyersParam) {
       const requested = buyersParam.split('||').map(b => normBuyerName(b)).filter(Boolean)
       if (isAdmin) {
@@ -1010,20 +1212,19 @@ router.get('/shipped-po-summary', requireAuth, async (req, res) => {
       } else {
         allowedBuyers = requested.filter(b => orgAllowedBuyers.map(normBuyerName).includes(b))
       }
+      const ownLinkIds = buyerSupplierOrgs.map(o => o.buyer_supplier_link_id).filter(Boolean)
+      linkIds = allowedBuyers.length
+        ? await resolveLinkIdsByBuyerNames(allowedBuyers, isAdmin ? null : ownLinkIds)
+        : []
     } else if (isAdmin && merchant?.trim()) {
-      const perfKey = fy === '27' ? FILE_KEYS.merchantPerformanceFy27 : FILE_KEYS.merchantPerformance
-      const perfWorkbook = await downloadWorkbook(perfKey)
-      const { rows: perfRows } = parseSheet(perfWorkbook)
-      allowedBuyers = [...new Set(
-        perfRows
-          .filter(r => r['Email']?.toString().toLowerCase().trim() === merchant.toLowerCase().trim())
-          .map(r => normBuyerName(r['Buyer']))
-          .filter(b => b && !b.includes('TOTAL'))
-      )]
+      linkIds = await resolveLinkIdsByMerchantEmail(merchant)
+      allowedBuyers = null // scoped by linkIds instead — keeps totalCustomers using allCustomers.length below
     } else if (isAdmin) {
       allowedBuyers = null
+      linkIds = null
     } else {
       allowedBuyers = orgAllowedBuyers.map(normBuyerName)
+      linkIds = buyerSupplierOrgs.map(o => o.buyer_supplier_link_id).filter(Boolean)
     }
 
     if (buyersParam && allowedBuyers.length === 0) {
@@ -1041,78 +1242,22 @@ router.get('/shipped-po-summary', requireAuth, async (req, res) => {
       })
     }
 
-    const fileKey = fy === '27' ? FILE_KEYS.shippedPoFy27 : FILE_KEYS.shippedPoFy26
-    const workbook = await downloadWorkbook(fileKey)
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]]
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
-      header: 1, defval: '', blankrows: false, raw: false,
-    })
-    if (jsonData.length < 2) return res.status(404).json({ error: 'Empty or invalid file' })
-
-    const headers = jsonData[0].map(h =>
-      h?.toString().trim().replace(/\u00A0/g, ' ').replace(/\s+/g, ' ') || ''
-    )
-    const colIdx = name => headers.findIndex(h => h.toLowerCase() === name.toLowerCase())
-
-    const col = {
-      customer:       colIdx('Customer'),
-      vendor:         colIdx('Vendor'),
-      poNo:           colIdx('PO No.'),
-      item:           colIdx('Item'),
-      orderQty:       colIdx('Order Qty'),
-      orderPrice:     colIdx('Order Price'),
-      orderValue:     colIdx('Order Value in US $'),
-      orderDate:      colIdx('Order Date'),
-      shippedQty:     colIdx('Shipped Qty'),
-      shippedValue:   colIdx('Shipped Value in US $'),
-      shippedDate:    colIdx('Shipped Date'),
-      cancelledQty:   colIdx('Cancelled Qty'),
-      cancelledValue: colIdx('Cancelled Value in US $'),
-      balanceQty:     colIdx('Balance Qty'),
-      balanceValue:   colIdx('Balance Value in US $'),
-      target:         colIdx('Target'),
-      totalBusiness:  colIdx('Total Business'),
-      status:         colIdx('Status'),
+    if (Array.isArray(linkIds) && linkIds.length === 0) {
+      return res.json({
+        success: true,
+        data: { rows: [], rowCount: 0 },
+        pagination: { page: pageNum, pageSize: pageSz, totalPages: 0, totalCustomers: 0 },
+        overall: {
+          orderValue: 0, shippedValue: 0, cancelledValue: 0, balanceValue: 0,
+          orderQty: 0, shippedQty: 0, cancelledQty: 0, balanceQty: 0,
+          totalPoCount: 0, totalLineCount: 0,
+        },
+        customerBuyers: orgAllowedBuyers,
+        customerSuppliers: allowedSuppliers,
+      })
     }
 
-    const allRows = jsonData.slice(1)
-      .filter(row => row?.[col.customer]?.toString().trim())
-      .map(row => ({
-        customer:       row[col.customer]?.toString().trim() || '',
-        vendor:         row[col.vendor]?.toString().trim() || '',
-        poNo:           row[col.poNo]?.toString().trim() || '',
-        item:           row[col.item]?.toString().trim() || '',
-        orderQty:       cleanNumber(row[col.orderQty]),
-        orderPrice:     cleanNumber(row[col.orderPrice]),
-        orderValue:     cleanNumber(row[col.orderValue]),
-        orderDate:      row[col.orderDate]?.toString().trim() || '',
-        shippedQty:     cleanNumber(row[col.shippedQty]),
-        shippedValue:   cleanNumber(row[col.shippedValue]),
-        shippedDate:    row[col.shippedDate]?.toString().trim() || '',
-        cancelledQty:   cleanNumber(row[col.cancelledQty]),
-        cancelledValue: cleanNumber(row[col.cancelledValue]),
-        balanceQty:     cleanNumber(row[col.balanceQty]),
-        balanceValue:   cleanNumber(row[col.balanceValue]),
-        target:         row[col.target]?.toString().trim() || '',
-        totalBusiness:  cleanNumber(row[col.totalBusiness]),
-        status:         row[col.status]?.toString().trim() || '',
-      }))
-
-    const filteredRows = allowedBuyers === null
-      ? allRows
-      : allowedBuyers.length > 0
-        ? allRows.filter(row => allowedBuyers.includes(normBuyerName(row.customer)))
-        : []
-
-    const allowedSuppliersNorm = allowedSuppliers.map(s => normBuyerName(s))
-    const skipSupplierFilter = !!buyersParam || (isAdmin && merchant?.trim()) || allowedBuyers === null
-
-    const filteredRowsWithSuppliers = (allowedSuppliersNorm.length > 0 && !skipSupplierFilter)
-    ? filteredRows.filter(row => 
-        allowedSuppliersNorm.includes(normBuyerName(row.vendor))
-      )
-    : filteredRows
-    
+    const filteredRowsWithSuppliers = await fetchShippedSkuRows({ linkIds, fy })
 
     // ── Server-side month filter ──────────────────────────────────────────
     const monthFiltered = month

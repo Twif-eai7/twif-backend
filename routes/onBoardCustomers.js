@@ -1,4 +1,5 @@
 const express = require('express')
+const crypto = require('crypto')
 const axios = require('axios')
 const { Resend } = require('resend')
 const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber')
@@ -152,7 +153,10 @@ async function createOrgAndOwner({
     website: domain || null,
     no_of_employees: numberOfEmployees || null,
     no_of_members: 1,
-    status: 'pending'
+    status: 'pending',
+    // Set explicitly so the Approvals / Organisations "Created" column always
+    // has a value, regardless of whether the column has a DB default.
+    created_on: new Date().toISOString()
   }
 
   if (orgType === 'supplier') {
@@ -490,12 +494,12 @@ router.get('/categories', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // GET /org-customers/gst-lookup?gstin=06AAPFJ1459D1ZD
-// Resolves a GSTIN to registered address + pincode via Appyflow.
-// Soft-fails if APPYFLOW_GST_KEY is not set so onboarding still works.
+// Resolves a GSTIN to its registered address + pincode via Appyflow.
+// Requires APPYFLOW_GST_KEY. Fails soft so onboarding still works without it.
 // ─────────────────────────────────────────────
 const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/
 
-router.get('/gst-lookup', async (req, res) => {
+router.get('/gst-lookup', requireAuth, async (req, res) => {
   const gstin = String(req.query.gstin || '').toUpperCase().trim()
 
   if (!GSTIN_RE.test(gstin)) {
@@ -513,6 +517,7 @@ router.get('/gst-lookup', async (req, res) => {
       timeout: 8000,
     })
 
+    // Appyflow returns { error: true, message } on a failed / rate-limited lookup
     if (data?.error || !data?.taxpayerInfo) {
       return res.status(404).json({ error: data?.message || 'GSTIN not found' })
     }
@@ -527,10 +532,11 @@ router.get('/gst-lookup', async (req, res) => {
       success: true,
       data: {
         gstin,
+        // PAN is embedded in the GSTIN (chars 3-12), no lookup needed.
         pan: gstin.slice(2, 12),
         legalName: info?.lgnm || '',
         tradeName: info?.tradeNam || '',
-        constitution: info?.ctb || '',
+        constitution: info?.ctb || '',   // e.g. "Proprietorship", "Private Limited Company"
         status: info?.sts || '',
         address: info?.pradr?.adr || composed,
         pincode: addr.pncd || '',
@@ -1182,6 +1188,7 @@ router.get('/orgs/pending', requireSuperAdmin, async (req, res) => {
       .select(`
         id, name, display_name, type, country, domain, created_on,
         address, owner_name, owner_email, owner_phone, reason_for_contact, logo_url,
+        admin_notes,
         nda_accepted, nda_signature_name, nda_signature_type, nda_signature_image, nda_accepted_at,
         nda_verified_at, nda_verified_by,
         jng_signature_type, jng_signature_name, jng_signature_image,
@@ -1226,6 +1233,53 @@ function adminSignatureFromOrg(org) {
 }
 
 // ─────────────────────────────────────────────
+// Internal admin notes on a pending org — stored as a JSON array on
+// organizations.admin_notes. Never shown to the vendor / in the NDA.
+// ─────────────────────────────────────────────
+const noteList = (org) => (Array.isArray(org?.admin_notes) ? org.admin_notes : [])
+const byCreatedAt = (a, b) => new Date(a.created_at) - new Date(b.created_at)
+
+router.post('/orgs/:id/notes', requireSuperAdmin, async (req, res) => {
+  const { id } = req.params
+  const note = (req.body?.note || '').trim()
+  if (!note) return res.status(400).json({ error: 'Note text is required' })
+
+  const { data: org, error: fErr } = await supabase
+    .from('organizations').select('admin_notes').eq('id', id).single()
+  if (fErr || !org) return res.status(404).json({ error: 'Organization not found' })
+
+  const { data: me } = await supabase
+    .from('organization_members').select('full_name')
+    .eq('user_id', req.user.id).maybeSingle()
+
+  const entry = {
+    id: crypto.randomUUID(),
+    note,
+    author_name: me?.full_name || req.user.email,
+    author_email: req.user.email,
+    created_at: new Date().toISOString(),
+  }
+
+  const { error: uErr } = await supabase
+    .from('organizations')
+    .update({ admin_notes: [...noteList(org), entry] })
+    .eq('id', id)
+
+  if (uErr) {
+    console.error('POST /orgs/:id/notes error:', uErr.message)
+    return res.status(500).json({ error: 'Failed to save note' })
+  }
+  return res.json({ success: true, data: entry })
+})
+
+router.get('/orgs/:id/notes', requireSuperAdmin, async (req, res) => {
+  const { data: org, error } = await supabase
+    .from('organizations').select('admin_notes').eq('id', req.params.id).single()
+  if (error || !org) return res.status(404).json({ error: 'Organization not found' })
+  return res.json({ success: true, data: noteList(org).slice().sort(byCreatedAt) })
+})
+
+// ─────────────────────────────────────────────
 // GET /customers/orgs/:id/nda-preview
 // Super-admin only — dry-run PDF using current data, no persistence. Lets the
 // admin review the exact document before Verify/Sign/Approve. The Twif side
@@ -1265,6 +1319,52 @@ router.get('/orgs/:id/nda-preview', requireSuperAdmin, async (req, res) => {
   } catch (err) {
     console.error('NDA preview generation failed:', err.message)
     return res.status(500).json({ error: 'Failed to generate preview' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// GET /customers/my-nda
+// A supplier fetches their own NDA. Resolves the caller's org from the JWT,
+// then reuses the same live-generated PDF as the admin nda-preview.
+// ─────────────────────────────────────────────
+router.get('/my-nda', requireAuth, async (req, res) => {
+  try {
+    const { data: member } = await supabase
+      .from('organization_members')
+      .select('organizations!inner(id, type)')
+      .eq('user_id', req.user.id)
+      .maybeSingle()
+
+    const org0 = member?.organizations
+    if (!org0) return res.status(404).json({ error: 'No organisation found for this account' })
+    if (org0.type !== 'supplier') return res.status(403).json({ error: 'Only suppliers have an NDA' })
+
+    const { data: org } = await supabase
+      .from('organizations').select(NDA_ORG_SELECT).eq('id', org0.id).single()
+    if (!org || !org.nda_accepted) return res.status(404).json({ error: 'No signed agreement on file' })
+
+    const { data: owner } = await supabase
+      .from('organization_members').select('job_title')
+      .eq('organization_id', org0.id).eq('role', 'owner').maybeSingle()
+
+    const { data: activityLog } = await supabase
+      .from('nda_activity_log')
+      .select('event_type, actor_name, actor_email, ip_address, created_at')
+      .eq('organization_id', org0.id).order('created_at', { ascending: true })
+
+    const pdfBuffer = await buildSignedNdaPdf({
+      organization: org,
+      ownerJobTitle: owner?.job_title,
+      adminSignature: adminSignatureFromOrg(org),
+      activityLog: activityLog || [],
+    })
+
+    res.set('Content-Type', 'application/pdf')
+    res.set('Content-Disposition', 'inline; filename="nda.pdf"')
+    return res.send(pdfBuffer)
+  } catch (err) {
+    console.error('my-nda generation failed:', err.message)
+    return res.status(500).json({ error: 'Failed to generate agreement' })
   }
 })
 
@@ -1511,27 +1611,54 @@ router.patch('/orgs/:id/approve', requireSuperAdmin, async (req, res) => {
 router.patch('/orgs/:id/reject', requireSuperAdmin, async (req, res) => {
   try {
     const { id } = req.params
-    const { reason } = req.body
+    const reason = (req.body?.reason || '').trim()
+    if (!reason) return res.status(400).json({ error: 'A reason is required to reject' })
 
     const { data: org, error: fetchError } = await supabase
       .from('organizations')
-      .select('id, name, display_name, status')
+      .select(NDA_ORG_SELECT)
       .eq('id', id)
       .single()
 
     if (fetchError || !org) return res.status(404).json({ error: 'Organization not found' })
     if (org.status !== 'pending') return res.status(400).json({ error: `Organization already ${org.status}` })
 
-    // Delete org and cascade — owner can re-apply
-    await supabase.from('organization_members').delete().eq('organization_id', id)
-    await supabase.from('organizations').delete().eq('id', id)
+    const orgDisplayName = org.display_name || org.name
 
+    // Read everything the email needs BEFORE the cascade delete.
     const { data: owner } = await supabase
       .from('organization_members')
-      .select('email')
+      .select('email, job_title')
       .eq('organization_id', id)
       .eq('role', 'owner')
       .maybeSingle()
+
+    let pdfAttachment = null
+    if (org.type === 'supplier' && org.nda_accepted) {
+      try {
+        const { data: activityLog } = await supabase
+          .from('nda_activity_log')
+          .select('event_type, actor_name, actor_email, ip_address, created_at')
+          .eq('organization_id', id)
+          .order('created_at', { ascending: true })
+
+        const pdfBuffer = await buildSignedNdaPdf({
+          organization: org,
+          ownerJobTitle: owner?.job_title,
+          adminSignature: adminSignatureFromOrg(org),
+          activityLog: activityLog || [],
+        })
+        pdfAttachment = { filename: `${orgDisplayName} - NDA.pdf`, content: pdfBuffer.toString('base64') }
+      } catch (pdfErr) {
+        // A PDF failure must never block the rejection or its email.
+        console.error('Failed to generate NDA PDF for rejection:', pdfErr.message)
+      }
+    }
+
+    // Delete org and cascade — owner can re-apply. admin_notes is a column on
+    // the org row, so it goes away with it.
+    await supabase.from('organization_members').delete().eq('organization_id', id)
+    await supabase.from('organizations').delete().eq('id', id)
 
     if (owner) {
       await resend.emails.send({
@@ -1542,15 +1669,17 @@ router.patch('/orgs/:id/reject', requireSuperAdmin, async (req, res) => {
           <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:40px 20px;">
             <h2 style="color:#1a1a1a;">Application update</h2>
             <p style="color:#586069;">
-              Your application for <strong>${org.display_name || org.name}</strong> was not approved at this time.
-              ${reason ? `<br><br>Reason: ${reason}` : ''}
+              Your application for <strong>${orgDisplayName}</strong> was not approved at this time.
+              <br><br>Reason: ${reason}
             </p>
+            ${pdfAttachment ? `<p style="color:#586069;">A copy of the agreement you submitted is attached for your records.</p>` : ''}
             <p style="color:#8e8e8e;font-size:13px;margin-top:24px;">
               If you believe this is a mistake, please reply to this email.
             </p>
           </div>
-        `
-      })
+        `,
+        ...(pdfAttachment && { attachments: [pdfAttachment] }),
+      }).catch(err => console.error('Failed to send rejection email:', err.message))
     }
 
     return res.json({ success: true, message: 'Organization rejected and removed' })
@@ -1889,28 +2018,195 @@ router.get('/all', requireSuperAdmin, async (req, res) => {
 // Returns all organisations with pagination
 // ─────────────────────────────────────────────
 router.get('/orgs/all', requireSuperAdmin, async (req, res) => {
-  const { limit = 100, offset = 0 } = req.query
+  const { limit = 100, offset = 0, type, status, search } = req.query
   try {
-    const { data, error, count } = await supabase
+    // Filtering (type/status/search) has to happen in this query, not client-side after
+    // the fact — the page only ever holds `limit` rows, so a client-side filter over that
+    // slice silently drops anything past the first page (e.g. "Buyer" filter showing 75
+    // when the table actually has 103 buyers spread across page 2 as well).
+    let query = supabase
       .from('organizations')
       .select(`
         id, name, display_name, type, country, domain,
         status, no_of_members, created_on
       `, { count: 'exact' })
       .order('created_on', { ascending: false })
-      .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1)
- 
+
+    if (type && type !== 'all') query = query.eq('type', type)
+    if (status && status !== 'all') {
+      query = status === 'active' ? query.or('status.eq.active,status.is.null') : query.eq('status', status)
+    }
+    if (search) query = query.or(`display_name.ilike.%${search}%,name.ilike.%${search}%,domain.ilike.%${search}%`)
+
+    const { data, error, count } = await query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1)
+
     if (error) throw error
+
+    // Stat tiles (Active/Pending/Buyers/Suppliers) must reflect the WHOLE table, not just
+    // this one page of `limit` rows — head:true count-only queries, run in parallel, so
+    // adding a filter here never has to pull the underlying rows back over the wire.
+    const countQuery = (filters) => {
+      let q = supabase.from('organizations').select('id', { count: 'exact', head: true })
+      for (const [col, val] of Object.entries(filters)) q = q.eq(col, val)
+      return q
+    }
+    const [grandTotal, buyers, suppliers, merchants, active, pending, suspended] = await Promise.all([
+      supabase.from('organizations').select('id', { count: 'exact', head: true }),
+      countQuery({ type: 'buyer' }),
+      countQuery({ type: 'supplier' }),
+      countQuery({ type: 'merchant' }),
+      // A null status counts as "active" (frontend's convention — see OrganisationsPage.jsx's
+      // statusFilter === 'active' && !o.status), so this can't be a plain .eq('status','active').
+      supabase.from('organizations').select('id', { count: 'exact', head: true }).or('status.eq.active,status.is.null'),
+      countQuery({ status: 'pending' }),
+      countQuery({ status: 'suspended' }),
+    ])
+
     return res.json({
       success: true,
       data: {
         orgs: data,
-        pageInfo: { total: count, limit: parseInt(limit), offset: parseInt(offset) }
+        // `total` here is the FILTERED count (matches type/status/search above) — used for
+        // "Showing X of Y". The stat tiles below need the UNFILTERED table-wide numbers
+        // instead, so they don't fluctuate as someone clicks through the filter pills.
+        pageInfo: { total: count, limit: parseInt(limit), offset: parseInt(offset) },
+        counts: {
+          grandTotal: grandTotal.count ?? 0,
+          buyers: buyers.count ?? 0,
+          suppliers: suppliers.count ?? 0,
+          merchants: merchants.count ?? 0,
+          active: active.count ?? 0,
+          pending: pending.count ?? 0,
+          suspended: suspended.count ?? 0,
+        },
       }
     })
   } catch (err) {
     console.error('GET /orgs/all error:', err.message)
     return res.status(500).json({ error: 'Failed to fetch organisations' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// PATCH /org-customers/members/:id — super-admin only
+// Moves a member to a different organization and/or changes their role/department.
+// Routed through the backend (service-role client) rather than a direct frontend
+// Supabase update — the existing RLS admin policy on organization_members scopes
+// UPDATEs to rows within the admin's own org, which correctly blocks edits like
+// allowed_modules going cross-org but also blocks changing organization_id itself
+// (moving someone OUT of/INTO an org fails that same check).
+// ─────────────────────────────────────────────
+router.patch('/members/:id', requireSuperAdmin, async (req, res) => {
+  const { organization_id, role, department } = req.body
+  const updates = {}
+  if (organization_id !== undefined) updates.organization_id = organization_id
+  if (role !== undefined) updates.role = role
+  if (department !== undefined) updates.department = department
+
+  if (!Object.keys(updates).length) return res.status(400).json({ error: 'Nothing to update' })
+  if (role !== undefined && !['owner', 'admin', 'member'].includes(role))
+    return res.status(400).json({ error: "role must be 'owner', 'admin', or 'member'" })
+
+  try {
+    if (organization_id) {
+      const { data: org } = await supabase.from('organizations').select('id').eq('id', organization_id).maybeSingle()
+      if (!org) return res.status(404).json({ error: 'Organisation not found' })
+    }
+
+    const { data, error } = await supabase
+      .from('organization_members')
+      .update(updates)
+      .eq('id', req.params.id)
+      .select('id')
+      .maybeSingle()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Member not found' })
+
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('PATCH /members/:id error:', err.message)
+    return res.status(500).json({ error: 'Failed to update member' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// POST /org-customers/create-organization — super-admin only
+// Creates a new organization row from the Organisations admin page.
+// ─────────────────────────────────────────────
+router.post('/create-organization', requireSuperAdmin, async (req, res) => {
+  const { type, name, display_name, domain, country } = req.body
+  if (!type || !name || !display_name)
+    return res.status(400).json({ error: 'type, name, and display_name are required' })
+  if (!['merchant', 'buyer', 'supplier'].includes(type))
+    return res.status(400).json({ error: "type must be 'merchant', 'buyer', or 'supplier'" })
+
+  try {
+    const { data, error } = await supabase
+      .from('organizations')
+      .insert({ type, name, display_name, domain: domain || null, country: country || null })
+      .select()
+      .single()
+    if (error) throw error
+    return res.json({ success: true, data })
+  } catch (err) {
+    console.error('POST /create-organization error:', err.message)
+    return res.status(500).json({ error: 'Failed to create organisation' })
+  }
+})
+
+// ─────────────────────────────────────────────
+// POST /org-customers/create-user — super-admin only
+// Creates a login-capable user end to end: Supabase Auth user + portal_users +
+// organization_members, from the Members admin page. Replaces the previous manual
+// 3-step process (create in Supabase Auth dashboard, copy uid into portal_users,
+// copy uid again into organization_members). Onboarding is marked complete
+// immediately, so the user logs in via the existing OTP flow at /auth.
+// ─────────────────────────────────────────────
+router.post('/create-user', requireSuperAdmin, async (req, res) => {
+  const { email, full_name, organization_id, role, department, password } = req.body
+  if (!email || !organization_id || !role)
+    return res.status(400).json({ error: 'email, organization_id, and role are required' })
+  if (!['owner', 'admin', 'member'].includes(role))
+    return res.status(400).json({ error: "role must be 'owner', 'admin', or 'member'" })
+  if (password && password.length < 4)
+    return res.status(400).json({ error: 'Password must be at least 4 characters' })
+
+  try {
+    const { data: existing } = await supabase.from('portal_users').select('id').eq('email', email).maybeSingle()
+    if (existing) return res.status(409).json({ error: 'A user with this email already exists' })
+
+    // Supabase's admin API requires a password even if none is provided here — this app
+    // logs in via OTP, so a caller who doesn't pass one gets a random, never-surfaced
+    // value. If a password IS explicitly provided, it's used as-is and set as this
+    // user's real Supabase Auth password.
+    const authPassword = password || crypto.randomBytes(24).toString('base64')
+    const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+      email, password: authPassword, email_confirm: true,
+    })
+    if (authError) throw authError
+    const uid = authData.user.id
+
+    const { error: portalError } = await supabase
+      .from('portal_users')
+      .insert({ id: uid, email, onboarding_completed: true })
+    if (portalError) {
+      await supabase.auth.admin.deleteUser(uid)
+      throw portalError
+    }
+
+    const { error: memberError } = await supabase
+      .from('organization_members')
+      .insert({ user_id: uid, organization_id, full_name: full_name || null, email, role, department: department || null })
+    if (memberError) {
+      await supabase.from('portal_users').delete().eq('id', uid)
+      await supabase.auth.admin.deleteUser(uid)
+      throw memberError
+    }
+
+    return res.json({ success: true, data: { id: uid, email } })
+  } catch (err) {
+    console.error('POST /create-user error:', err.message)
+    return res.status(500).json({ error: err.message || 'Failed to create user' })
   }
 })
 

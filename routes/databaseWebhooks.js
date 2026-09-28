@@ -1,6 +1,8 @@
 const express = require ('express');
 const supabase = require('../supabaseClient')
 const { sendAlertEmail } = require('../service/emailService');
+const { parseFileRef } = require('../helper/storage');
+const { parseSkuSheet, parseSkuSheetWithGemini, parsePiFileWithGemini } = require('./skuItems');
 const dotenv = require("dotenv");
 dotenv.config();
 const router = express.Router();
@@ -71,27 +73,46 @@ router.post('/po-alerts', async (req, res) => {
   pi_file_url:      null,
 };
 
-    // ── Fetch merchant org ──
-// ── Fetch admin members ──
-const { data: adminMembers, error: adminError } = await supabase
-  .from('organization_members')
-  .select(`
-    id,
-    full_name,
-    email,
-    organizations!inner (
-      id,
-      type
-    )
-  `)
-  .eq('role', 'admin')
-  .eq('organizations.type', 'merchant')
+    // ── Resolve recipients: link-specific access first, org-wide as fallback ──
+    const { data: linkAccessRows } = await supabase
+      .from('member_organization_access')
+      .select('member_id')
+      .eq('buyer_supplier_link_id', po.buyer_supplier_link_id);
 
-if (adminError) console.error('❌ Admin fetch error:', adminError);
+    let memberIds = [...new Set((linkAccessRows || []).map(r => r.member_id))];
 
-if (!adminMembers?.length) {
-  return res.status(200).json({ success: true, alerts: 0, reason: 'No admin members' });
-}
+    if (memberIds.length === 0 && buyerOrgId) {
+      const { data: orgAccessRows } = await supabase
+        .from('member_organization_access')
+        .select('member_id')
+        .eq('organization_id', buyerOrgId)
+        .is('buyer_supplier_link_id', null);
+      memberIds = [...new Set((orgAccessRows || []).map(r => r.member_id))];
+    }
+
+    if (memberIds.length === 0) {
+      return res.status(200).json({ success: true, alerts: 0, reason: 'No members with buyer-org access' });
+    }
+
+    // Merchandising admins, or anyone in tech/erp — merchant-org members only.
+    const { data: candidateMembers, error: adminError } = await supabase
+      .from('organization_members')
+      .select(`
+        id, full_name, email, role, department,
+        organizations!inner ( type )
+      `)
+      .eq('organizations.type', 'merchant')
+      .in('id', memberIds);
+
+    if (adminError) console.error('❌ Admin fetch error:', adminError);
+
+    const adminMembers = (candidateMembers || []).filter(m =>
+      (m.department === 'merchandising' && m.role === 'admin') || m.department === 'tech' || m.department === 'erp'
+    );
+
+    if (!adminMembers?.length) {
+      return res.status(200).json({ success: true, alerts: 0, reason: 'No eligible recipients' });
+    }
 
     // ── Create in-app alerts ──
     const alertMessage = `PO received for ${buyerName} → ${supplierName} by ${createdByName} on ${po.po_received_date}`;
@@ -117,44 +138,13 @@ if (!adminMembers?.length) {
     if (alertError) console.error('❌ Alert insert error:', alertError);
     else console.log(`✅ ${insertedAlerts?.length || 0} alerts created`);
 
-    // ── Send emails via sendAlertEmail ──
-        const poDetails = {
-      buyer_name:       buyerName,
-      supplier_name:    supplierName,
-      po_number:        po.po_number,
-      quantity_ordered: po.quantity_ordered,
-      amount:           po.amount_usd ?? po.amount,
-      currency:         po.currency || 'USD',
-      date:             po.po_received_date,
-    };
-
-
-    const emailResult = await sendAlertEmail(
-      adminMembers.map(m => ({ email: m.email, name: m.full_name })),
-      alertMessage,
-      poDetails,
-      'PO_UPLOAD'
-    );
-
-    console.log('📧 Email result:', emailResult);
-
-    // ── Mark alerts as email_sent ──
-    if (emailResult.success && insertedAlerts?.length) {
-      const alertIds = insertedAlerts.map(a => a.id);
-      const { error: updateError } = await supabase
-        .from('alerts')
-        .update({ email_sent: true })
-        .in('id', alertIds);
-
-      if (updateError) console.error('❌ email_sent update error:', updateError);
-      else console.log('✅ Alerts marked email_sent');
-    }
+    // ── Email is no longer sent here — the daily upload-alerts-digest cron
+    // picks up alerts with email_sent = false and sends one summary per admin ──
 
     return res.status(200).json({
       success:        true,
       po_id:          po.id,
       alerts_created: insertedAlerts?.length || 0,
-      emails_sent:    emailResult.successCount,
     });
 
   } catch (err) {
@@ -269,28 +259,46 @@ if (deleteReminderError) {
        FETCH MERCHANT + ELIGIBLE MEMBERS
     ========================= */
 
-  // ── Fetch admin members ──
-const { data: adminMembers, error: adminError } = await supabase
-  .from('organization_members')
-  .select(`
-    id,
-    full_name,
-    email,
-    organizations!inner (
-      id,
-      type
-    )
-  `)
-  .eq('role', 'admin')
-  .eq('organizations.type', 'merchant')
+  // ── Resolve recipients: link-specific access first, org-wide as fallback ──
+  const { data: linkAccessRows } = await supabase
+    .from('member_organization_access')
+    .select('member_id')
+    .eq('buyer_supplier_link_id', record.buyer_supplier_link_id);
 
+  let memberIds = [...new Set((linkAccessRows || []).map(r => r.member_id))];
 
+  if (memberIds.length === 0 && buyerOrgId) {
+    const { data: orgAccessRows } = await supabase
+      .from('member_organization_access')
+      .select('member_id')
+      .eq('organization_id', buyerOrgId)
+      .is('buyer_supplier_link_id', null);
+    memberIds = [...new Set((orgAccessRows || []).map(r => r.member_id))];
+  }
 
-if (adminError) console.error('❌ Admin fetch error:', adminError);
+  if (memberIds.length === 0) {
+    return res.status(200).json({ success: true, alerts: 0, reason: 'No members with buyer-org access' });
+  }
 
-if (!adminMembers?.length) {
-  return res.status(200).json({ success: true, alerts: 0, reason: 'No admin members' });
-}
+  // Merchandising admins, or anyone in tech/erp — merchant-org members only.
+  const { data: candidateMembers, error: adminError } = await supabase
+    .from('organization_members')
+    .select(`
+      id, full_name, email, role, department,
+      organizations!inner ( type )
+    `)
+    .eq('organizations.type', 'merchant')
+    .in('id', memberIds);
+
+  if (adminError) console.error('❌ Admin fetch error:', adminError);
+
+  const adminMembers = (candidateMembers || []).filter(m =>
+    (m.department === 'merchandising' && m.role === 'admin') || m.department === 'tech' || m.department === 'erp'
+  );
+
+  if (!adminMembers?.length) {
+    return res.status(200).json({ success: true, alerts: 0, reason: 'No eligible recipients' });
+  }
 
     /* =========================
        CREATE NEW PI_UPLOAD ALERTS
@@ -346,25 +354,8 @@ if (!adminMembers?.length) {
     if (alertError) console.error('❌ Alert insert error:', alertError);
     else console.log(`✅ ${insertedAlerts?.length || 0} PI alerts created`);
 
-    /* =========================
-       SEND EMAILS (fire and forget)
-    ========================= */
-
-    sendAlertEmail(
-      adminMembers.map(m => ({ email: m.email, name: m.full_name })),
-      alertMessage,
-      {
-        buyer_name:       buyerNameText,
-        supplier_name:    supplierNameText,
-        po_number:        finalPoNumber,
-        pi_received_date: record.pi_received_date,
-      },
-      'PI_UPLOAD'
-    ).then(emailResult => {
-      console.log('📧 Email result:', emailResult);
-    }).catch(err => {
-      console.error('❌ Email sending failed:', err);
-    });
+    // ── Email is no longer sent here — the daily upload-alerts-digest cron
+    // picks up alerts with email_sent = false and sends one summary per admin ──
 
     return res.status(200).json({
       success:        true,
@@ -740,7 +731,12 @@ router.post('/otif-exception-alerts', async (req, res) => {
       return res.status(200).json({ success: true, skipped: true, reason: 'Not a new pending exception' })
     }
 
-    console.log(`🚀 Processing OTIF exception: ${record.id} for PO: ${record.po_id}`)
+    // otif_exceptions holds both OTIF exceptions and quantity cancellation
+    // requests (exception_type distinguishes them) - see
+    // supabase/migrations/20260824_extend_otif_exceptions_for_cancellations.sql
+    const isQuantityCancellation = record.exception_type === 'quantity_cancellation'
+
+    console.log(`🚀 Processing ${isQuantityCancellation ? 'quantity cancellation' : 'OTIF'} exception: ${record.id} for PO: ${record.po_id}`)
 
     // ── Fetch PO + buyer/supplier names ──
     const { data: po, error: poError } = await supabase
@@ -761,6 +757,19 @@ router.post('/otif-exception-alerts', async (req, res) => {
     const buyerName    = po.buyer_supplier_links?.buyer?.display_name    || 'Unknown Buyer'
     const supplierName = po.buyer_supplier_links?.supplier?.display_name || 'Unknown Supplier'
 
+    // ── Fetch the SKU line item, for cancellation requests only ──
+    let lineItem = null
+    if (isQuantityCancellation && record.line_item_id) {
+      const { data: li, error: liError } = await supabase
+        .from('po_line_items')
+        .select('buyer_sku_ref, quantity_ordered, cancelled_quantity')
+        .eq('id', record.line_item_id)
+        .maybeSingle()
+
+      if (liError) console.error('❌ Line item fetch error:', liError)
+      lineItem = li
+    }
+
     // ── Fetch senior + tech admins only ──
     const { data: adminMembers, error: adminError } = await supabase
       .from('organization_members')
@@ -779,23 +788,40 @@ router.post('/otif-exception-alerts', async (req, res) => {
     }
 
     // ── Build details ──
-    const alertMessage = `OTIF exception raised for PO#${po.po_number} (${buyerName}) by ${record.reported_by}`
+    const alertType = isQuantityCancellation ? 'QUANTITY_CANCELLATION' : 'OTIF_EXCEPTION'
 
-    const poDetails = {
-      buyer_name:               buyerName,
-      supplier_name:            supplierName,
-      po_number:                po.po_number,
-      ex_factory_date:          po.ex_factory_date,
-      proposed_ex_factory_date: record.proposed_ex_factory_date,
-      reason:                   record.reason,
-      comment:                  record.comment,
-      reported_by:              record.reported_by,
-    }
+    const alertMessage = isQuantityCancellation
+      ? `Quantity cancellation requested for PO#${po.po_number} (${buyerName})${lineItem?.buyer_sku_ref ? ` · SKU ${lineItem.buyer_sku_ref}` : ''} by ${record.reported_by}`
+      : `OTIF exception raised for PO#${po.po_number} (${buyerName}) by ${record.reported_by}`
+
+    const poDetails = isQuantityCancellation
+      ? {
+          buyer_name:         buyerName,
+          supplier_name:      supplierName,
+          po_number:          po.po_number,
+          sku:                lineItem?.buyer_sku_ref,
+          requested_quantity: record.requested_quantity,
+          quantity_ordered:   lineItem?.quantity_ordered,
+          already_cancelled:  lineItem?.cancelled_quantity,
+          reason:             record.reason,
+          comment:            record.comment,
+          reported_by:        record.reported_by,
+        }
+      : {
+          buyer_name:               buyerName,
+          supplier_name:            supplierName,
+          po_number:                po.po_number,
+          ex_factory_date:          po.ex_factory_date,
+          proposed_ex_factory_date: record.proposed_ex_factory_date,
+          reason:                   record.reason,
+          comment:                  record.comment,
+          reported_by:              record.reported_by,
+        }
 
     // ── Insert in-app alerts ──
     const alertInserts = adminMembers.map(member => ({
       message:           alertMessage,
-      alert_type:        'OTIF_EXCEPTION',
+      alert_type:        alertType,
       po_id:             record.po_id,
       po_snapshot:       poDetails,
       recipient_user_id: member.id,
@@ -819,7 +845,7 @@ router.post('/otif-exception-alerts', async (req, res) => {
       adminMembers.map(m => ({ email: m.email, name: m.full_name })),
       alertMessage,
       poDetails,
-      'OTIF_EXCEPTION'
+      alertType
     )
 
     console.log('📧 Email result:', emailResult)
@@ -939,6 +965,394 @@ router.post('/qa-inspection-comment', async (req, res) => {
   }
 })
 
+
+
+/* =========================
+   Shared by both entry points below — parses `record.product_details_file_url`
+   and creates a review batch. Never writes to skus/po_line_items directly —
+   a human still confirms each row before anything lands there. Best-effort:
+   a bad/unparseable sheet or missing link just means no batch gets created
+   (returned as `skipped`, never throws for those cases) — PO Drawer falls
+   back to the manual "Create SKUs" upload flow when no batch exists for a PO.
+
+   Also fires in-app alerts to erp/tech members, but only once a batch is
+   actually created — deliberately not on any `skipped` path. An earlier
+   version alerted unconditionally on any file change via a separate
+   webhook, which meant erp/tech got pinged for sheets the parser couldn't
+   extract anything from, with nothing to actually go review.
+========================= */
+async function parseAndCreateBatchForPo(record) {
+  console.log(`🚀 Parsing product details sheet for PO: ${record.id} (PO#${record.po_number})`)
+
+  /* ========================= RESOLVE BUYER + VENDOR ORG IDS ========================= */
+
+  const { data: link, error: linkError } = await supabase
+    .from('buyer_supplier_links')
+    .select(`
+      buyer_org_id, supplier_org_id,
+      buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (display_name),
+      supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (display_name)
+    `)
+    .eq('id', record.buyer_supplier_link_id)
+    .maybeSingle()
+
+  if (linkError) throw linkError
+  if (!link) return { success: true, skipped: true, reason: 'Buyer-supplier link not found' }
+
+  const { buyer_org_id: buyerOrgId, supplier_org_id: vendorId } = link
+  const buyerName    = link.buyer?.display_name    || 'Unknown Buyer'
+  const supplierName = link.supplier?.display_name || 'Unknown Supplier'
+
+  /* ========================= DOWNLOAD THE ALREADY-UPLOADED FILE ========================= */
+
+  const { bucket, path } = parseFileRef(record.product_details_file_url)
+  if (!bucket || !path) {
+    return { success: true, skipped: true, reason: 'Could not resolve file location' }
+  }
+
+  const { data: fileBlob, error: downloadError } = await supabase.storage.from(bucket).download(path)
+  if (downloadError) throw downloadError
+  const buffer = Buffer.from(await fileBlob.arrayBuffer())
+
+  /* ========================= PARSE ========================= */
+
+  let parsed
+  let parseFailureDetail = null
+  try {
+    parsed = await parseSkuSheet({ buffer, vendorId, buyerOrgId })
+  } catch (err) {
+    console.error('❌ Product sheet parse failed:', err.message)
+    parsed = { rows: [] }
+    parseFailureDetail = err.message
+  }
+
+  // A genuine .xlsx/.xls can "succeed" (real sheet, real header row) but
+  // still end up with zero usable rows if none of its columns match any
+  // FIELD_RULES pattern — that's not a thrown error, so it wouldn't be
+  // caught above, but it's the same practical dead end for the reviewer as
+  // a parse failure. Try the Gemini fallback for either case.
+  if (!parsed.rows.length) {
+    console.error('⚠️ Deterministic parse produced no rows, trying Gemini fallback')
+    try {
+      parsed = await parseSkuSheetWithGemini({ buffer, vendorId, buyerOrgId })
+    } catch (aiErr) {
+      console.error('❌ Gemini fallback also failed:', aiErr.message)
+      return { success: true, skipped: true, reason: 'Parse failed', detail: parseFailureDetail || aiErr.message }
+    }
+  }
+
+  if (!parsed.rows.length) {
+    return { success: true, skipped: true, reason: 'No new SKU rows found' }
+  }
+
+  /* ========================= REPLACE ANY EXISTING BATCH(ES) FOR THIS PO =========================
+     Only once we know the new file actually parsed into something — a re-upload represents "here's
+     the current sheet", so whatever batch already exists for this PO (e.g. from the original upload,
+     still sitting unreviewed) gets replaced rather than left duplicated alongside the new one. Cascades
+     sku_import_rows away via FK; never touches `skus` — any already-confirmed SKU is untouched either way. */
+
+  const { error: deleteOldBatchesError } = await supabase
+    .from('sku_import_batches')
+    .delete()
+    .eq('po_id', record.id)
+  if (deleteOldBatchesError) throw deleteOldBatchesError
+
+  /* ========================= PERSIST BATCH + ROWS ========================= */
+
+  const { data: batch, error: batchError } = await supabase
+    .from('sku_import_batches')
+    .insert({
+      buyer_org_id: buyerOrgId,
+      vendor_org_id: vendorId,
+      po_id: record.id,
+      file_name: path.split('/').pop(),
+      sheet_used: parsed.sheetUsed,
+      uploaded_by: null,
+      import_type: 'product_sheet',
+    })
+    .select()
+    .single()
+  if (batchError) throw batchError
+
+  const { error: rowsError } = await supabase
+    .from('sku_import_rows')
+    .insert(parsed.rows.map((r, idx) => ({
+      batch_id: batch.id,
+      row_index: idx,
+      confirmed: r.confirmed || {},
+      needs_confirm: r.needs_confirm || {},
+      needs_input: r.needs_input || {},
+      raw_mapped: r.raw_mapped || null,
+      sku_id: r.sku_id ?? null,
+    })))
+  if (rowsError) throw rowsError
+
+  console.log(`✅ Created SKU import batch ${batch.id} (${parsed.rows.length} rows) for PO ${record.id}`)
+
+  /* ========================= IN-APP ALERTS — ERP/TECH ONLY, ON REAL SUCCESS =========================
+     Deliberately only fires from here, not on any of the `skipped`/failure returns above — an alert
+     saying "product sheet uploaded" is only useful once there's actually something to review. Firing it
+     unconditionally on file-change (an earlier version did this as a separate webhook) meant erp/tech
+     could get pinged for a sheet the parser couldn't extract anything from, with nothing to act on. */
+
+  const { data: recipients, error: recipientsError } = await supabase
+    .from('organization_members')
+    .select(`id, full_name, organizations!inner (type)`)
+    .in('department', ['erp', 'tech'])
+    .eq('organizations.type', 'merchant')
+
+  if (recipientsError) {
+    console.error('❌ Alert recipient fetch error:', recipientsError)
+  } else if (recipients?.length) {
+    const alertMessage = `Product sheet parsed for PO#${record.po_number} (${buyerName} → ${supplierName}) — ${parsed.rows.length} SKU${parsed.rows.length === 1 ? '' : 's'} ready to review`
+    const alertInserts = recipients.map(member => ({
+      message:           alertMessage,
+      alert_type:        'PRODUCT_SHEET_UPDATE',
+      po_id:             record.id,
+      po_snapshot:       { po_id: record.id, po_number: record.po_number, buyer_name: buyerName, supplier_name: supplierName, batch_id: batch.id },
+      recipient_user_id: member.id,
+      recipient_name:    member.full_name,
+      is_read:           false,
+      retry_count:       0,
+      scheduled_for:     new Date().toISOString(),
+      email_sent:        false,
+    }))
+
+    const { error: alertError } = await supabase.from('alerts').insert(alertInserts)
+    if (alertError) console.error('❌ Product sheet alert insert error:', alertError)
+    else console.log(`✅ ${alertInserts.length} product sheet alerts created`)
+  }
+
+  return { success: true, po_id: record.id, batch_id: batch.id, rows_created: parsed.rows.length }
+}
+
+/* =========================
+   POST /webhooks/product-details-uploaded
+   Two ways to call this, both behind the same x-webhook-secret auth:
+
+   1. Supabase webhook — triggered on INSERT/UPDATE to purchase_orders.
+      Body: { record, old_record }. Only proceeds if product_details_file_url
+      actually changed, so this doesn't re-parse on every unrelated PO edit.
+
+   2. Manual — `{ "poId": "<uuid>" }`, no `record`/`old_record`. For POs that
+      had a product details file attached before this feature shipped (the
+      webhook never fired for those, since nothing changed after it existed)
+      or where the webhook failed — always re-parses the PO's current file
+      regardless of whether it "changed", since calling this manually means
+      "yes, do it". e.g.:
+        curl -X POST https://<backend>/webhooks/product-details-uploaded \
+          -H "x-webhook-secret: $WEBHOOK_SECRET" -H "Content-Type: application/json" \
+          -d '{"poId":"<po-uuid>"}'
+========================= */
+router.post('/product-details-uploaded', async (req, res) => {
+  const secret = req.headers['x-webhook-secret']
+  if (secret !== process.env.WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  try {
+    let record
+
+    if (req.body.poId) {
+      const { data: po, error: poError } = await supabase
+        .from('purchase_orders')
+        .select('id, po_number, buyer_supplier_link_id, product_details_file_url')
+        .eq('id', req.body.poId)
+        .maybeSingle()
+      if (poError) throw poError
+      if (!po) return res.status(404).json({ error: 'Purchase order not found' })
+      if (!po.product_details_file_url) {
+        return res.status(200).json({ success: true, skipped: true, reason: 'No product details file on this PO' })
+      }
+      record = po
+    } else {
+      const { record: webhookRecord, old_record } = req.body
+      if (!webhookRecord) return res.status(400).json({ error: 'No record in payload' })
+
+      const fileAdded = webhookRecord.product_details_file_url && webhookRecord.product_details_file_url !== old_record?.product_details_file_url
+      if (!fileAdded) {
+        return res.status(200).json({ success: true, skipped: true, reason: 'product_details_file_url unchanged' })
+      }
+      record = webhookRecord
+    }
+
+    const result = await parseAndCreateBatchForPo(record)
+    return res.status(200).json(result)
+
+  } catch (err) {
+    console.error('❌ product-details-uploaded error:', err)
+    return res.status(500).json({ error: err.message })
+  }
+})
+
+
+/* =========================
+   Shared by both entry points below — mirrors parseAndCreateBatchForPo
+   exactly, parsing `record.pi_file_url` instead. Gemini-only (no
+   deterministic parser attempt — an invoice layout isn't a fit for the
+   FIELD_RULES column-mapper) via parsePiFileWithGemini. Kept as its own
+   function/route rather than folded into the existing /pi-alerts webhook,
+   which has unrelated PO_UPLOAD-alert-updating logic — same separation of
+   concerns as the product-sheet webhook above.
+========================= */
+async function parseAndCreatePiBatchForPo(record) {
+  console.log(`🚀 Parsing PI for PO: ${record.id} (PO#${record.po_number})`)
+
+  const { data: link, error: linkError } = await supabase
+    .from('buyer_supplier_links')
+    .select(`
+      buyer_org_id, supplier_org_id,
+      buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (display_name),
+      supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (display_name)
+    `)
+    .eq('id', record.buyer_supplier_link_id)
+    .maybeSingle()
+
+  if (linkError) throw linkError
+  if (!link) return { success: true, skipped: true, reason: 'Buyer-supplier link not found' }
+
+  const { buyer_org_id: buyerOrgId, supplier_org_id: vendorId } = link
+  const buyerName    = link.buyer?.display_name    || 'Unknown Buyer'
+  const supplierName = link.supplier?.display_name || 'Unknown Supplier'
+
+  const { bucket, path } = parseFileRef(record.pi_file_url)
+  if (!bucket || !path) {
+    return { success: true, skipped: true, reason: 'Could not resolve file location' }
+  }
+
+  const { data: fileBlob, error: downloadError } = await supabase.storage.from(bucket).download(path)
+  if (downloadError) throw downloadError
+  const buffer = Buffer.from(await fileBlob.arrayBuffer())
+
+  let parsed
+  try {
+    parsed = await parsePiFileWithGemini({ buffer, vendorId, buyerOrgId, poId: record.id })
+  } catch (err) {
+    console.error('❌ PI parse failed:', err.message)
+    return { success: true, skipped: true, reason: 'Parse failed', detail: err.message }
+  }
+
+  if (!parsed.rows.length) {
+    return { success: true, skipped: true, reason: 'No new PI line items found' }
+  }
+
+  // Replace any existing PI batch for this PO (a re-uploaded/revised PI
+  // represents "here's the current one") — same reasoning as the
+  // product-sheet path, scoped to import_type so it never touches a
+  // product-sheet batch for the same PO.
+  const { error: deleteOldBatchesError } = await supabase
+    .from('sku_import_batches')
+    .delete()
+    .eq('po_id', record.id)
+    .eq('import_type', 'pi')
+  if (deleteOldBatchesError) throw deleteOldBatchesError
+
+  const { data: batch, error: batchError } = await supabase
+    .from('sku_import_batches')
+    .insert({
+      buyer_org_id: buyerOrgId,
+      vendor_org_id: vendorId,
+      po_id: record.id,
+      file_name: path.split('/').pop(),
+      sheet_used: parsed.sheetUsed,
+      uploaded_by: null,
+      import_type: 'pi',
+    })
+    .select()
+    .single()
+  if (batchError) throw batchError
+
+  const { error: rowsError } = await supabase
+    .from('sku_import_rows')
+    .insert(parsed.rows.map((r, idx) => ({
+      batch_id: batch.id,
+      row_index: idx,
+      confirmed: r.confirmed || {},
+      needs_confirm: r.needs_confirm || {},
+      needs_input: r.needs_input || {},
+      raw_mapped: r.raw_mapped || null,
+      sku_id: r.sku_id ?? null,
+    })))
+  if (rowsError) throw rowsError
+
+  console.log(`✅ Created PI import batch ${batch.id} (${parsed.rows.length} rows) for PO ${record.id}`)
+
+  /* ── In-app alerts — erp/tech only, on real success — same reasoning as PRODUCT_SHEET_UPDATE ── */
+  const { data: recipients, error: recipientsError } = await supabase
+    .from('organization_members')
+    .select(`id, full_name, organizations!inner (type)`)
+    .in('department', ['erp', 'tech'])
+    .eq('organizations.type', 'merchant')
+
+  if (recipientsError) {
+    console.error('❌ Alert recipient fetch error:', recipientsError)
+  } else if (recipients?.length) {
+    const alertMessage = `PI parsed for PO#${record.po_number} (${buyerName} → ${supplierName}) — ${parsed.rows.length} line item${parsed.rows.length === 1 ? '' : 's'} ready to review`
+    const alertInserts = recipients.map(member => ({
+      message:           alertMessage,
+      alert_type:        'PI_SHEET_PARSED',
+      po_id:             record.id,
+      po_snapshot:       { po_id: record.id, po_number: record.po_number, buyer_name: buyerName, supplier_name: supplierName, batch_id: batch.id },
+      recipient_user_id: member.id,
+      recipient_name:    member.full_name,
+      is_read:           false,
+      retry_count:       0,
+      scheduled_for:     new Date().toISOString(),
+      email_sent:        false,
+    }))
+
+    const { error: alertError } = await supabase.from('alerts').insert(alertInserts)
+    if (alertError) console.error('❌ PI alert insert error:', alertError)
+    else console.log(`✅ ${alertInserts.length} PI alerts created`)
+  }
+
+  return { success: true, po_id: record.id, batch_id: batch.id, rows_created: parsed.rows.length }
+}
+
+/* =========================
+   POST /webhooks/pi-uploaded — same dual entry point (Supabase webhook, or
+   manual `{poId}`) and x-webhook-secret auth as /product-details-uploaded.
+========================= */
+router.post('/pi-uploaded', async (req, res) => {
+  const secret = req.headers['x-webhook-secret']
+  if (secret !== process.env.WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  try {
+    let record
+
+    if (req.body.poId) {
+      const { data: po, error: poError } = await supabase
+        .from('purchase_orders')
+        .select('id, po_number, buyer_supplier_link_id, pi_file_url')
+        .eq('id', req.body.poId)
+        .maybeSingle()
+      if (poError) throw poError
+      if (!po) return res.status(404).json({ error: 'Purchase order not found' })
+      if (!po.pi_file_url) {
+        return res.status(200).json({ success: true, skipped: true, reason: 'No PI file on this PO' })
+      }
+      record = po
+    } else {
+      const { record: webhookRecord, old_record } = req.body
+      if (!webhookRecord) return res.status(400).json({ error: 'No record in payload' })
+
+      const fileAdded = webhookRecord.pi_file_url && webhookRecord.pi_file_url !== old_record?.pi_file_url
+      if (!fileAdded) {
+        return res.status(200).json({ success: true, skipped: true, reason: 'pi_file_url unchanged' })
+      }
+      record = webhookRecord
+    }
+
+    const result = await parseAndCreatePiBatchForPo(record)
+    return res.status(200).json(result)
+
+  } catch (err) {
+    console.error('❌ pi-uploaded error:', err)
+    return res.status(500).json({ error: err.message })
+  }
+})
 
 
 module.exports = router;

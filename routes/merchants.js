@@ -705,13 +705,55 @@ router.put('/revise-confirmed-po/:poId', upload.fields([{ name: 'piFile', maxCou
       else console.log('✅ Alerts promoted to PO_REVISION');
     }
 
-    // Send revision email to admins (fire and forget)
-    supabase
-      .from('organization_members')
-      .select('full_name, email')
-      .eq('role', 'admin')
-      .then(({ data: adminMembers }) => {
+    // Send revision email — only to admins with access to this PO's buyer
+    // org (link-specific access takes priority, org-wide access is the
+    // fallback), not every admin in the system (fire and forget)
+    (async () => {
+      try {
+        const effectiveLinkId = newLinkId || existingPO.buyer_supplier_link_id;
+
+        const { data: linkRow } = await supabase
+          .from('buyer_supplier_links')
+          .select('buyer_org_id')
+          .eq('id', effectiveLinkId)
+          .maybeSingle();
+
+        const buyerOrgId = linkRow?.buyer_org_id;
+
+        const { data: linkAccessRows } = await supabase
+          .from('member_organization_access')
+          .select('member_id')
+          .eq('buyer_supplier_link_id', effectiveLinkId);
+
+        let memberIds = [...new Set((linkAccessRows || []).map(r => r.member_id))];
+
+        if (memberIds.length === 0 && buyerOrgId) {
+          const { data: orgAccessRows } = await supabase
+            .from('member_organization_access')
+            .select('member_id')
+            .eq('organization_id', buyerOrgId)
+            .is('buyer_supplier_link_id', null);
+          memberIds = [...new Set((orgAccessRows || []).map(r => r.member_id))];
+        }
+
+        if (memberIds.length === 0) return;
+
+        // Merchandising admins, or anyone in tech/erp — merchant-org members only.
+        const { data: candidateMembers } = await supabase
+          .from('organization_members')
+          .select(`
+            full_name, email, role, department,
+            organizations!inner ( type )
+          `)
+          .eq('organizations.type', 'merchant')
+          .in('id', memberIds);
+
+        const adminMembers = (candidateMembers || []).filter(m =>
+          (m.department === 'merchandising' && m.role === 'admin') || m.department === 'tech' || m.department === 'erp'
+        );
+
         if (!adminMembers?.length) return;
+
         sendAlertEmail(
           adminMembers.map(m => ({ email: m.email, name: m.full_name })),
           revisionMessage,
@@ -728,8 +770,10 @@ router.put('/revise-confirmed-po/:poId', upload.fields([{ name: 'piFile', maxCou
           'PO_REVISION'
         ).then(r => console.log('📧 PO revision email result:', r))
          .catch(err => console.error('❌ PO revision email failed:', err));
-      })
-      .catch(err => console.error('❌ Admin fetch for revision email failed:', err));
+      } catch (err) {
+        console.error('❌ Scoped admin fetch for revision email failed:', err);
+      }
+    })();
 
     /* =========================
        SUCCESS
@@ -2573,29 +2617,12 @@ router.post('/delete-po/:poId', async (req, res) => {
     };
 
     /* =========================
-       FETCH PO + LINK DATA
+       VERIFY PO EXISTS AND ISN'T ALREADY DELETED
     ========================= */
 
     const { data: po, error: poError } = await supabase
       .from('purchase_orders')
-      .select(`
-        id,
-        po_number,
-        po_received_date,
-        quantity_ordered,
-        amount,
-        po_file_url,
-        pi_file_url,
-        buyer_supplier_links (
-          buyer_org_id,
-          buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
-            display_name
-          ),
-          supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
-            display_name
-          )
-        )
-      `)
+      .select('id')
       .eq('id', poId)
       .is('delete_meta', null)
       .maybeSingle();
@@ -2604,9 +2631,6 @@ router.post('/delete-po/:poId', async (req, res) => {
     if (!po) {
       return res.status(404).json({ error: 'PO not found or already deleted.' });
     }
-
-    const buyerName    = po.buyer_supplier_links?.buyer?.display_name    || 'Unknown Buyer';
-    const supplierName = po.buyer_supplier_links?.supplier?.display_name || 'Unknown Supplier';
 
     /* =========================
        SOFT DELETE PO
@@ -2653,62 +2677,8 @@ router.post('/delete-po/:poId', async (req, res) => {
       }
     }
 
-    /* =========================
-       FETCH MERCHANT MEMBERS
-    ========================= */
-
-    const { data: merchantOrg } = await supabase
-      .from('organizations')
-      .select('id')
-      .eq('type', 'merchant')
-      .maybeSingle();
-
-    const { data: accessRows } = await supabase
-      .from('member_organization_access')
-      .select(`
-        organization_members (
-          id,
-          full_name,
-          email,
-          organization_id
-        )
-      `)
-      .eq('organization_id', po.buyer_supplier_links.buyer_org_id);
-
-    const eligibleMembers = (accessRows || [])
-      .map(r => r.organization_members)
-      .filter(m =>
-        m &&
-        merchantOrg &&
-        m.organization_id === merchantOrg.id
-      );
-
-    /* =========================
-       SEND EMAIL
-    ========================= */
-
-    if (eligibleMembers.length > 0) {
-      const message = `PO ${po.po_number} for ${buyerName} → ${supplierName} was deleted by ${member.full_name}${reason ? `: ${reason}` : ' (no reason provided)'}`;
-
-      sendAlertEmail(
-        eligibleMembers.map(m => ({
-          email: m.email,
-          name:  m.full_name
-        })),
-        message,
-        {
-          buyer_name:        buyerName,
-          supplier_name:     supplierName,
-          po_number:         po.po_number,
-          quantity_ordered:  po.quantity_ordered,
-          amount:            po.amount,
-          date:              po.po_received_date,
-          deleted_by:        member.full_name,
-          reason:            reason || 'No reason provided'
-        },
-        'PO_DELETED'
-      ).catch(err => console.error('❌ Delete email failed:', err));
-    }
+    // ── Email is not sent here — the DB webhook (po-delete-alerts), triggered
+    // by this same delete_meta update, is the single source for that email ──
 
     /* =========================
        SUCCESS

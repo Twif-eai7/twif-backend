@@ -27,17 +27,10 @@ const ALLOWLIST = [
   { method: 'POST',  filePath: 'routes/plm.js', route: '/workspace-invites/accept',
     reason: 'Intentionally public — authenticates via an unguessable invite token looked up in npd2_invites, not a session (the accepting user may not have one yet).' },
 
-  // ── Known gaps, not yet fixed (tracked in memory: project-backend-auth-gaps) ──
-  { method: 'GET',   filePath: 'routes/plm.js', route: '/catalog',
-    reason: 'KNOWN GAP — trusts customerId query param with no auth check. Not yet fixed.' },
-  { method: 'GET',   filePath: 'routes/plm.js', route: '/catalog/skus/:id',
-    reason: 'KNOWN GAP — no auth check on a single SKU read. Not yet fixed.' },
-  { method: 'GET',   filePath: 'routes/plm.js', route: '/catalog/upload-status/:id',
-    reason: 'KNOWN GAP — no auth check on upload-status polling. Not yet fixed.' },
-  { method: 'GET',   filePath: 'routes/plm.js', route: '/catalog/skus/:id/workspaces',
-    reason: 'KNOWN GAP — no auth check. Not yet fixed.' },
-  { method: 'GET',   filePath: 'routes/plm.js', route: '/workspaces/:id',
-    reason: 'KNOWN GAP — no auth check. Not yet fixed.' },
+  // ── Former known gaps, resolved: GET /catalog, GET /catalog/skus/:id,
+  //   GET /catalog/skus/:id/workspaces, GET /workspaces/:id, POST /catalog/upload were
+  //   DELETED (unauthenticated, zero callers); GET /catalog/upload-status/:id now has
+  //   requireAuth + a creator/same-org party check. No allow-list entry needed. ──
 
   // ── Legacy routes, confirmed dead (superseded by /sku-workspaces/*) ──
   // Deliberately left unauthenticated rather than fixed or deleted — see

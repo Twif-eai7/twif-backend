@@ -7,6 +7,7 @@ const { parseFileRef, buildFileRef, ACTIVE_BUCKET, resolveFileUrl,getPublicUrls 
 const { convertAndStorePdf } = require('../helper/convertAndStorePdf');
 const { link } = require('pdfkit');
 const { requireAuth } = require('../middleware/auth')
+const { Blob } = require('buffer')
 
 const EXCEL_EXT = /\.(xlsx|xls|xlsm|xlsb|csv)$/i
 const isExcel = filename => EXCEL_EXT.test(filename)
@@ -494,6 +495,78 @@ router.post('/confirm/:poId',
   }
 })
 
+
+/* =========================
+   PUT /purchase-orders/product-details/:poId
+   Attaches (or replaces) a PO's product details file standalone — for when
+   it wasn't provided during the original PI upload (the optional field on
+   PiUploadModal.jsx). Same storage path/directory convention as /confirm and
+   /revise-confirmed-po's own product details handling above, reusing the
+   PO's existing directory (derived from po_file_url) so all of a PO's files
+   stay together. Updating product_details_file_url here fires the same
+   Supabase DB webhook as any other change to that column (see
+   shopify-backend/routes/databaseWebhooks.js) — no separate trigger needed,
+   the auto-parse-into-a-review-batch flow just works.
+========================= */
+router.put('/product-details/:poId', upload.fields([{ name: 'productDetailsFile', maxCount: 1 }]), async (req, res) => {
+  let productDetailsFilePath = null
+  let poBucket = ACTIVE_BUCKET
+
+  try {
+    const { poId } = req.params
+    const productDetailsFile = req.files?.productDetailsFile?.[0]
+
+    if (!poId || !productDetailsFile) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    const { data: poData, error: poError } = await supabase
+      .from('purchase_orders')
+      .select('id, po_file_url')
+      .eq('id', poId)
+      .maybeSingle()
+    if (poError) throw poError
+    if (!poData) return res.status(404).json({ error: 'Purchase Order not found' })
+    if (!poData.po_file_url) throw new Error('PO file URL not found in database')
+
+    const { path: cleanPoPath, bucket } = parseFileRef(poData.po_file_url)
+    poBucket = bucket
+    const directoryPath = cleanPoPath.split('/').slice(0, -1).join('/')
+    if (!directoryPath) throw new Error('Could not extract directory path from PO file URL')
+
+    const safeName = sanitizeFileName(productDetailsFile.originalname)
+    productDetailsFilePath = `${directoryPath}/product_details_${Date.now()}_${safeName}`
+
+    const { error: uploadError } = await supabase.storage
+      .from(poBucket)
+      .upload(productDetailsFilePath, productDetailsFile.buffer, {
+        contentType: productDetailsFile.mimetype,
+        upsert: false,
+      })
+    if (uploadError) throw uploadError
+
+    const productDetailsFileRef = buildFileRef(productDetailsFilePath, poBucket)
+
+    const { error: updateError } = await supabase
+      .from('purchase_orders')
+      .update({ product_details_file_url: productDetailsFileRef })
+      .eq('id', poId)
+    if (updateError) throw updateError
+
+    console.log('✅ Product details file attached to PO', poId, '->', productDetailsFilePath)
+    return res.status(200).json({ success: true, product_details_file_url: productDetailsFileRef })
+
+  } catch (err) {
+    console.error('❌ Product details upload error:', err)
+    if (productDetailsFilePath) {
+      console.log('🗑️ Cleaning up uploaded product details file:', productDetailsFilePath)
+      await supabase.storage.from(poBucket).remove([productDetailsFilePath])
+    }
+    return res.status(500).json({ error: err.message || 'Upload failed' })
+  }
+})
+
+
 router.put('/update/:poId', upload.single('poFile'), async (req, res) => {
   let newFilePath = null;
   let oldFilePath = null; 
@@ -525,6 +598,13 @@ router.put('/update/:poId', upload.single('poFile'), async (req, res) => {
         error: 'poId and updatedBy required'
       });
     }
+
+    const { data: updatedByMember } = await supabase
+      .from('organization_members')
+      .select('full_name')
+      .eq('id', updatedBy)
+      .maybeSingle();
+    const updatedByName = updatedByMember?.full_name || updatedBy;
 
     /* =========================
        FETCH EXISTING PO
@@ -835,7 +915,7 @@ router.put('/update/:poId', upload.single('poFile'), async (req, res) => {
     if (supplierNameText) updateChanges.push(`Supplier → ${supplierNameText}`);
 
     const finalPoNum = updateData.po_number || existingPO.po_number;
-    const updateMessage = `PO#${finalPoNum} updated by ${updatedBy}${updateChanges.length ? ': ' + updateChanges.join(', ') : ''}`;
+    const updateMessage = `PO#${finalPoNum} updated by ${updatedByName}${updateChanges.length ? ': ' + updateChanges.join(', ') : ''}`;
 
     if (existingAlerts && existingAlerts.length > 0) {
       console.log('📋 Found alerts to promote:', existingAlerts.length);
@@ -854,7 +934,7 @@ router.put('/update/:poId', upload.single('poFile'), async (req, res) => {
           ...(buyerNameText && { buyer_name: buyerNameText }),
           ...(supplierNameText && { supplier_name: supplierNameText }),
           last_updated_at: new Date().toISOString(),
-          last_updated_by: updatedBy,
+          last_updated_by: updatedByName,
           version: updateData.current_version,
           ...(updateChanges.length > 0 && { changes: updateChanges.join(', ') }),
         };
@@ -1307,6 +1387,19 @@ const updatedByName = updatedByMember?.full_name || updatedBy;
     console.log('✅ PO revision saved:', poId, '— version:', updateData.current_version);
 
     /* =========================
+       PROPAGATE EX-FACTORY DATE TO LINE ITEMS
+    ========================= */
+
+    if (updateData.ex_factory_date && updateData.ex_factory_date !== existingPO.ex_factory_date) {
+      const { error: lineItemDateError } = await supabase
+        .from('po_line_items')
+        .update({ target_date: updateData.ex_factory_date })
+        .eq('po_id', poId);
+
+      if (lineItemDateError) console.error('❌ Failed to sync line item target_date:', lineItemDateError);
+    }
+
+    /* =========================
        UPDATE EXISTING ALERTS → PO_REVISION
     ========================= */
     if (!existingPO.is_test) {
@@ -1393,13 +1486,55 @@ const updatedByName = updatedByMember?.full_name || updatedBy;
       else console.log('✅ Alerts promoted to PO_REVISION');
     }
 
-    // Send revision email to admins (fire and forget)
-    supabase
-      .from('organization_members')
-      .select('full_name, email')
-      .eq('role', 'admin')
-      .then(({ data: adminMembers }) => {
+    // Send revision email — only to admins with access to this PO's buyer
+    // org (link-specific access takes priority, org-wide access is the
+    // fallback), not every admin in the system (fire and forget)
+    (async () => {
+      try {
+        const effectiveLinkId = newLinkId || existingPO.buyer_supplier_link_id;
+
+        const { data: linkRow } = await supabase
+          .from('buyer_supplier_links')
+          .select('buyer_org_id')
+          .eq('id', effectiveLinkId)
+          .maybeSingle();
+
+        const buyerOrgId = linkRow?.buyer_org_id;
+
+        const { data: linkAccessRows } = await supabase
+          .from('member_organization_access')
+          .select('member_id')
+          .eq('buyer_supplier_link_id', effectiveLinkId);
+
+        let memberIds = [...new Set((linkAccessRows || []).map(r => r.member_id))];
+
+        if (memberIds.length === 0 && buyerOrgId) {
+          const { data: orgAccessRows } = await supabase
+            .from('member_organization_access')
+            .select('member_id')
+            .eq('organization_id', buyerOrgId)
+            .is('buyer_supplier_link_id', null);
+          memberIds = [...new Set((orgAccessRows || []).map(r => r.member_id))];
+        }
+
+        if (memberIds.length === 0) return;
+
+        // Merchandising admins, or anyone in tech/erp — merchant-org members only.
+        const { data: candidateMembers } = await supabase
+          .from('organization_members')
+          .select(`
+            full_name, email, role, department,
+            organizations!inner ( type )
+          `)
+          .eq('organizations.type', 'merchant')
+          .in('id', memberIds);
+
+        const adminMembers = (candidateMembers || []).filter(m =>
+          (m.department === 'merchandising' && m.role === 'admin') || m.department === 'tech' || m.department === 'erp'
+        );
+
         if (!adminMembers?.length) return;
+
         sendAlertEmail(
           adminMembers.map(m => ({ email: m.email, name: m.full_name })),
           revisionMessage,
@@ -1417,8 +1552,10 @@ const updatedByName = updatedByMember?.full_name || updatedBy;
           'PO_REVISION'
         ).then(r => console.log('📧 PO revision email result:', r))
          .catch(err => console.error('❌ PO revision email failed:', err));
-      })
-      .catch(err => console.error('❌ Admin fetch for revision email failed:', err));
+      } catch (err) {
+        console.error('❌ Scoped admin fetch for revision email failed:', err);
+      }
+    })();
     }
 
     /* =========================
@@ -1555,6 +1692,8 @@ router.post('/comment/:poId', async (req, res) => {
   }
 })
 
+
+
 router.post('/otif-exception/:poId', requireAuth, upload.single('proofImage'), async (req, res) => {
   let filePath = null
   const BUCKET_NAME = ACTIVE_BUCKET
@@ -1596,8 +1735,10 @@ router.post('/otif-exception/:poId', requireAuth, upload.single('proofImage'), a
 
     /* ========================= BUILD STORAGE PATH ========================= */
 
-    // po_received_date is stored as "January-05-2025"
-    const [monthFolder, dayFolder] = po.po_received_date?.split('-') ?? ['Unknown', '00']
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December']
+    const dateObj = new Date(po.po_received_date)
+    const monthFolder = Number.isNaN(dateObj.getTime()) ? 'Unknown' : months[dateObj.getMonth()]
+    const dayFolder   = Number.isNaN(dateObj.getTime()) ? '00' : String(dateObj.getDate()).padStart(2, '0')
 
     const safeBuyer   = (po.buyer_supplier_links?.buyer?.display_name || 'UnknownBuyer')
       .replace(/[^a-zA-Z0-9 _-]/g, '').trim()
@@ -1608,9 +1749,17 @@ router.post('/otif-exception/:poId', requireAuth, upload.single('proofImage'), a
 
     /* ========================= UPLOAD PROOF IMAGE ========================= */
 
+    // Passing the raw multer Buffer directly here was letting the storage
+    // client's Node upload path infer/attach the original filename and
+    // nest it as an extra path segment (objects landed at
+    // "<filePath>/<safeFileName>" instead of "<filePath>") — every proof
+    // image ended up 404ing at the path we actually recorded. Wrapping it
+    // in a Blob forces the binary-body code path instead.
+    const fileBlob = new Blob([file.buffer], { type: file.mimetype })
+
     const { error: uploadError } = await supabase.storage
       .from(BUCKET_NAME)
-      .upload(filePath, file.buffer, { contentType: file.mimetype, upsert: false })
+      .upload(filePath, fileBlob, { contentType: file.mimetype, upsert: false })
 
     if (uploadError) throw uploadError
 
@@ -1647,6 +1796,126 @@ router.post('/otif-exception/:poId', requireAuth, upload.single('proofImage'), a
     }
 
     return res.status(500).json({ error: err.message || 'Failed to report OTIF exception' })
+  }
+})
+
+
+// Same request+proof+approval shape as /otif-exception above, reused for a
+// different exception_type ('quantity_cancellation') on the same
+// otif_exceptions table rather than a second near-identical table/route -
+// see supabase/migrations/20260824_extend_otif_exceptions_for_cancellations.sql.
+router.post('/quantity-cancellation/:lineItemId', requireAuth, upload.single('proofImage'), async (req, res) => {
+  let filePath = null
+  const BUCKET_NAME = ACTIVE_BUCKET
+
+  try {
+    const { lineItemId } = req.params
+    const { comment, reason, requestedQuantity } = req.body
+    const file = req.file
+    const member = await resolveMember(req, res, 'id, full_name')
+    if (!member) return
+
+    const reportedBy = member?.full_name
+    const amount = Number(requestedQuantity)
+
+    /* ========================= VALIDATE ========================= */
+
+    if (!lineItemId || !reason || !file || !Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Missing required fields' })
+    }
+
+    /* ========================= FETCH LINE ITEM + PO ========================= */
+
+    const { data: li, error: liError } = await supabase
+      .from('po_line_items')
+      .select(`
+        id, quantity_ordered, cancelled_quantity, buyer_sku_ref,
+        purchase_orders (
+          id, po_number, po_received_date,
+          buyer_supplier_links(
+            buyer:organizations!buyer_supplier_links_buyer_org_id_fkey(display_name)
+          )
+        )
+      `)
+      .eq('id', lineItemId)
+      .maybeSingle()
+
+    if (liError) throw liError
+    if (!li) return res.status(404).json({ error: 'Line item not found' })
+
+    if (Number(li.cancelled_quantity || 0) + amount > Number(li.quantity_ordered || 0)) {
+      return res.status(400).json({ error: "Cancelled Qty can't exceed the SKU's Order Qty" })
+    }
+
+    const { data: existingPending } = await supabase
+      .from('otif_exceptions')
+      .select('id')
+      .eq('line_item_id', lineItemId)
+      .eq('exception_type', 'quantity_cancellation')
+      .eq('status', 'pending')
+      .maybeSingle()
+    if (existingPending) {
+      return res.status(400).json({ error: 'A cancellation request is already pending for this SKU' })
+    }
+
+    /* ========================= BUILD STORAGE PATH ========================= */
+
+    const po = li.purchase_orders
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December']
+    const dateObj = new Date(po?.po_received_date)
+    const monthFolder = Number.isNaN(dateObj.getTime()) ? 'Unknown' : months[dateObj.getMonth()]
+    const dayFolder   = Number.isNaN(dateObj.getTime()) ? '00' : String(dateObj.getDate()).padStart(2, '0')
+
+    const safeBuyer   = (po?.buyer_supplier_links?.buyer?.display_name || 'UnknownBuyer')
+      .replace(/[^a-zA-Z0-9 _-]/g, '').trim()
+    const safePoNumber = sanitizePathSegment(po?.po_number)
+    const safeFileName = sanitizeFileName(file.originalname)
+
+    filePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${safePoNumber}/cancellation/${Date.now()}_${safeFileName}`
+
+    /* ========================= UPLOAD PROOF IMAGE ========================= */
+
+    const { error: uploadError } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(filePath, file.buffer, { contentType: file.mimetype, upsert: false })
+
+    if (uploadError) throw uploadError
+
+    /* ========================= INSERT CANCELLATION REQUEST ========================= */
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('otif_exceptions')
+      .insert([{
+        po_id:              po?.id,
+        exception_type:     'quantity_cancellation',
+        line_item_id:       lineItemId,
+        requested_quantity: amount,
+        reason,
+        proof_url:          buildFileRef(filePath),
+        comment,
+        reported_by:        reportedBy,
+      }])
+      .select()
+      .maybeSingle()
+
+    if (insertError) throw insertError
+    console.log('✅ Quantity cancellation request created:', inserted.id)
+
+    return res.json({
+      success:     true,
+      exceptionId: inserted.id,
+      message:     'Cancellation request submitted successfully',
+    })
+
+  } catch (err) {
+    console.error('❌ Quantity Cancellation Error:', err)
+
+    if (filePath) {
+      console.log('🗑️ Cleaning up uploaded file:', filePath)
+      await supabase.storage.from(BUCKET_NAME).remove([filePath])
+    }
+
+    return res.status(500).json({ error: err.message || 'Failed to submit cancellation request' })
   }
 })
 
@@ -1715,29 +1984,12 @@ router.post('/delete/:poId', async (req, res) => {
     };
 
     /* =========================
-       FETCH PO + LINK DATA
+       VERIFY PO EXISTS AND ISN'T ALREADY DELETED
     ========================= */
 
     const { data: po, error: poError } = await supabase
       .from('purchase_orders')
-      .select(`
-        id,
-        po_number,
-        po_received_date,
-        quantity_ordered,
-        amount,
-        po_file_url,
-        pi_file_url,
-        buyer_supplier_links (
-          buyer_org_id,
-          buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
-            display_name
-          ),
-          supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
-            display_name
-          )
-        )
-      `)
+      .select('id')
       .eq('id', poId)
       .is('delete_meta', null)
       .maybeSingle();
@@ -1746,9 +1998,6 @@ router.post('/delete/:poId', async (req, res) => {
     if (!po) {
       return res.status(404).json({ error: 'PO not found or already deleted.' });
     }
-
-    const buyerName    = po.buyer_supplier_links?.buyer?.display_name    || 'Unknown Buyer';
-    const supplierName = po.buyer_supplier_links?.supplier?.display_name || 'Unknown Supplier';
 
     /* =========================
        SOFT DELETE PO
@@ -1795,62 +2044,8 @@ router.post('/delete/:poId', async (req, res) => {
       }
     }
 
-    /* =========================
-       FETCH MERCHANT MEMBERS
-    ========================= */
-
-    const { data: merchantOrg } = await supabase
-      .from('organizations')
-      .select('id')
-      .eq('type', 'merchant')
-      .maybeSingle();
-
-    const { data: accessRows } = await supabase
-      .from('member_organization_access')
-      .select(`
-        organization_members (
-          id,
-          full_name,
-          email,
-          organization_id
-        )
-      `)
-      .eq('organization_id', po.buyer_supplier_links.buyer_org_id);
-
-    const eligibleMembers = (accessRows || [])
-      .map(r => r.organization_members)
-      .filter(m =>
-        m &&
-        merchantOrg &&
-        m.organization_id === merchantOrg.id
-      );
-
-    /* =========================
-       SEND EMAIL
-    ========================= */
-
-    if (eligibleMembers.length > 0) {
-      const message = `PO ${po.po_number} for ${buyerName} → ${supplierName} was deleted by ${member.full_name}${reason ? `: ${reason}` : ' (no reason provided)'}`;
-
-      sendAlertEmail(
-        eligibleMembers.map(m => ({
-          email: m.email,
-          name:  m.full_name
-        })),
-        message,
-        {
-          buyer_name:        buyerName,
-          supplier_name:     supplierName,
-          po_number:         po.po_number,
-          quantity_ordered:  po.quantity_ordered,
-          amount:            po.amount,
-          date:              po.po_received_date,
-          deleted_by:        member.full_name,
-          reason:            reason || 'No reason provided'
-        },
-        'PO_DELETED'
-      ).catch(err => console.error('❌ Delete email failed:', err));
-    }
+    // ── Email is not sent here — the DB webhook (po-delete-alerts), triggered
+    // by this same delete_meta update, is the single source for that email ──
 
     /* =========================
        SUCCESS

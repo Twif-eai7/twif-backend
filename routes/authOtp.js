@@ -1,3 +1,4 @@
+const crypto = require('crypto')
 const express = require('express')
 const rateLimit = require('express-rate-limit')
 const { Resend } = require('resend')
@@ -19,6 +20,44 @@ const sendOtpLimiter = rateLimit({
     res.status(429).json({ error: 'Too many code requests. Please wait a few minutes and try again.' })
   },
 })
+
+// A 4-digit code has only 10,000 combinations, so wrong guesses must be capped tightly.
+const verifyOtpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${String(req.body?.email || '').trim().toLowerCase()}|${rateLimit.ipKeyGenerator(req.ip)}`,
+  skipSuccessfulRequests: true,
+  handler: (_req, res) => {
+    res.status(429).json({ error: 'Too many attempts. Please request a new code in a few minutes.' })
+  },
+})
+
+const OTP_LENGTH = 4
+const OTP_TTL_MS = 10 * 60 * 1000
+const OTP_SECRET = process.env.OTP_SECRET || process.env.SUPABASE_SECRET_KEY
+
+function signOtp(email, code, exp) {
+  return crypto.createHmac('sha256', OTP_SECRET).update(`${email}|${code}|${exp}`).digest('base64url')
+}
+
+function issueOtp(email) {
+  const code = String(crypto.randomInt(0, 10 ** OTP_LENGTH)).padStart(OTP_LENGTH, '0')
+  const exp = Date.now() + OTP_TTL_MS
+  return { code, token: `${exp}.${signOtp(email, code, exp)}` }
+}
+
+function checkOtp(email, code, token) {
+  const [expStr, sig] = String(token || '').split('.')
+  const exp = Number(expStr)
+  if (!exp || !sig) return 'invalid'
+  if (Date.now() > exp) return 'expired'
+  const expected = Buffer.from(signOtp(email, code, exp))
+  const given = Buffer.from(sig)
+  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return 'invalid'
+  return 'ok'
+}
 
 async function findUserByEmail(email) {
   const { data: member } = await supabase
@@ -103,7 +142,7 @@ function otpEmailHtml(otp) {
           Your verification code
         </td></tr>
         <tr><td align="center" style="padding:8px 0 24px;font-size:14px;color:#64748b;line-height:1.5;">
-          Enter this code in the Twif sign-up screen. It expires in 1 hour.
+          Enter this code in the Twif sign-up screen. It expires in 10 minutes.
         </td></tr>
         <tr><td align="center" style="padding:8px 0 24px;">
           <div style="font-family:'Courier New',monospace;font-size:32px;letter-spacing:0.28em;font-weight:700;color:#0f172a;">
@@ -128,54 +167,53 @@ router.post('/send-otp', sendOtpLimiter, async (req, res) => {
       return res.status(400).json({ error: 'A valid email is required' })
     }
 
-    if (shouldCreateUser) {
-      await ensureUser(email, true)
-    } else {
-      const existing = await findUserByEmail(email)
-      if (existing && !existing.email_confirmed_at) {
-        await supabase.auth.admin.updateUserById(existing.id, { email_confirm: true })
-      }
-    }
+    await ensureUser(email, shouldCreateUser)
 
-    const redirectTo = `${FRONTEND_URL.replace(/\/$/, '')}/auth`
-    let { data, error } = await supabase.auth.admin.generateLink({
-      type: 'magiclink',
-      email,
-      options: { redirectTo },
-    })
-    if (error && /not found|unable to find/i.test(error.message || '')) {
-      if (!shouldCreateUser) {
-        const notFound = new Error('No account found with that email. Try requesting access instead.')
-        notFound.status = 404
-        throw notFound
-      }
-      await ensureUser(email, true)
-      ;({ data, error } = await supabase.auth.admin.generateLink({
-        type: 'magiclink',
-        email,
-        options: { redirectTo },
-      }))
-    }
-    if (error) throw error
-
-    const otp = data?.properties?.email_otp
-    if (!otp) throw new Error('Could not generate a verification code. Please try again.')
+    const { code, token } = issueOtp(email)
 
     const { error: mailError } = await resend.emails.send({
       from: FROM_EMAIL,
       to: email,
       subject: 'Your Twif verification code',
-      html: otpEmailHtml(otp),
-      text: `Your Twif verification code is ${otp}. Enter it in the sign-up screen. It expires in 1 hour.`,
+      html: otpEmailHtml(code),
+      text: `Your Twif verification code is ${code}. Enter it in the sign-up screen. It expires in 10 minutes.`,
     })
     if (mailError) throw mailError
 
-    return res.json({ success: true })
+    return res.json({ success: true, otpToken: token, otpLength: OTP_LENGTH })
   } catch (err) {
     const status = err.status || 500
     if (status === 404) return res.status(404).json({ error: err.message })
     console.error('POST /auth/send-otp:', err.message)
     return res.status(500).json({ error: 'Could not send the verification code. Please try again.' })
+  }
+})
+
+router.post('/verify-otp', verifyOtpLimiter, async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase()
+    const code = String(req.body?.code || '').replace(/\D/g, '')
+    if (!email || !EMAIL_RE.test(email) || code.length !== OTP_LENGTH) {
+      return res.status(400).json({ error: 'Invalid code' })
+    }
+
+    const result = checkOtp(email, code, req.body?.otpToken)
+    if (result === 'expired') return res.status(400).json({ error: 'Code expired. Please request a new one.' })
+    if (result !== 'ok') return res.status(400).json({ error: 'Invalid code' })
+
+    const { data, error } = await supabase.auth.admin.generateLink({
+      type: 'magiclink',
+      email,
+      options: { redirectTo: `${FRONTEND_URL.replace(/\/$/, '')}/auth` },
+    })
+    if (error) throw error
+    const tokenHash = data?.properties?.hashed_token
+    if (!tokenHash) throw new Error('No hashed_token returned')
+
+    return res.json({ tokenHash, type: data.properties.verification_type || 'magiclink' })
+  } catch (err) {
+    console.error('POST /auth/verify-otp:', err.message)
+    return res.status(500).json({ error: 'Verification failed. Please try again.' })
   }
 })
 

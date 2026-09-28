@@ -139,54 +139,106 @@ function wrapTemplate({ accentColor = '#000000', iconChar, badgeLabel, badgeColo
 function generateEmailTemplate(alertType, alertMessage, poDetails) {
   switch (alertType) {
 
-    // ── New PO received ──────────────────────
-    case 'PO_UPLOAD':
+    // ── New PO received (single-PO template — superseded by PO_UPLOAD_DIGEST,
+    //    no longer sent per-action; kept in case per-event email is ever needed again) ──
+    // case 'PO_UPLOAD':
+    //   return {
+    //     subject: `New Purchase Order — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
+    //     html: wrapTemplate({
+    //       accentColor: '#000000',
+    //       iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.27 6.96 12 12.01 20.73 6.96" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="22.08" x2="12" y2="12" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg>',
+    //       badgeLabel: 'New Order',
+    //       badgeColor: '#000000',
+    //       title: 'New Purchase Order Received',
+    //       subtitle: `Order reference · PO#${poDetails.po_number || 'N/A'}`,
+    //       rows: [
+    //         ['Buyer',           poDetails.buyer_name],
+    //         ['Supplier',        poDetails.supplier_name],
+    //         ['PO Number',       poDetails.po_number],
+    //         ['Quantity',        poDetails.quantity_ordered],
+    //         ['Order Amount',    poDetails.amount],
+    //         ['Date Received',   poDetails.date || poDetails.po_received_date],
+    //       ],
+    //       calloutBg: '#f5f5f5',
+    //       calloutBorder: '#000000',
+    //       calloutText: '<strong>Action Required:</strong> A new purchase order is just received. Check dashboard for the document.',
+    //     }),
+    //   };
+
+    // ── PI uploaded / confirmed (single-PO template — superseded by PI_UPLOAD_DIGEST,
+    //    no longer sent per-action; kept in case per-event email is ever needed again) ──
+    // case 'PI_UPLOAD':
+    //   return {
+    //     subject: `PI Confirmed — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
+    //     html: wrapTemplate({
+    //       accentColor: '#000000',
+    //       iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="14 2 14 8 20 8" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="9 15 11 17 15 13" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    //       badgeLabel: 'Confirmed',
+    //       badgeColor: '#000000',
+    //       title: 'Proforma Invoice Confirmed',
+    //       subtitle: `PI received for order · PO#${poDetails.po_number || 'N/A'}`,
+    //       rows: [
+    //         ['Buyer',           poDetails.buyer_name],
+    //         ['Supplier',        poDetails.supplier_name],
+    //         ['PO Number',       poDetails.po_number],
+    //         ['PI Received',     poDetails.pi_received_date || poDetails.date],
+    //         ['Status',          'Confirmed'],
+    //       ],
+    //       calloutBg: '#f5f5f5',
+    //       calloutBorder: '#000000',
+    //       calloutText: '<strong>Next Steps:</strong> The Proforma Invoice has been confirmed successfully.',
+    //     }),
+    //   };
+
+    // ── New POs received (daily digest) ──────
+    case 'PO_UPLOAD_DIGEST': {
+      const pos = poDetails.pos || [];
       return {
-        subject: `New Purchase Order — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
+        subject: pos.length === 1
+          ? `New Purchase Order — ${pos[0].buyer_name || 'Unknown Buyer'} · PO#${pos[0].po_number || 'N/A'}`
+          : `${pos.length} New Purchase Orders Received Today`,
         html: wrapTemplate({
           accentColor: '#000000',
           iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="3.27 6.96 12 12.01 20.73 6.96" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="22.08" x2="12" y2="12" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg>',
-          badgeLabel: 'New Order',
+          badgeLabel: 'New Orders',
           badgeColor: '#000000',
-          title: 'New Purchase Order Received',
-          subtitle: `Order reference · PO#${poDetails.po_number || 'N/A'}`,
-          rows: [
-            ['Buyer',           poDetails.buyer_name],
-            ['Supplier',        poDetails.supplier_name],
-            ['PO Number',       poDetails.po_number],
-            ['Quantity',        poDetails.quantity_ordered],
-            ['Order Amount',    poDetails.amount],
-            ['Date Received',   poDetails.date || poDetails.po_received_date],
-          ],
+          title: 'New Purchase Orders Received',
+          subtitle: pos.length === 1 ? `Order reference · PO#${pos[0].po_number || 'N/A'}` : `${pos.length} orders received today`,
+          rows: pos.map(po => [
+            `PO#${po.po_number || 'N/A'}`,
+            `${po.buyer_name || 'Unknown Buyer'} → ${po.supplier_name || 'Unknown Supplier'} · received ${po.date || '—'}`,
+          ]),
           calloutBg: '#f5f5f5',
           calloutBorder: '#000000',
-          calloutText: '<strong>Action Required:</strong> A new purchase order is just received. Check dashboard for the document.',
+          calloutText: '<strong>Action Required:</strong> The purchase order(s) above were received today. Check the dashboard for documents.',
         }),
       };
+    }
 
-    // ── PI uploaded / confirmed ──────────────
-    case 'PI_UPLOAD':
+    // ── PIs uploaded / confirmed (daily digest) ──
+    case 'PI_UPLOAD_DIGEST': {
+      const pos = poDetails.pos || [];
       return {
-        subject: `PI Confirmed — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
+        subject: pos.length === 1
+          ? `PI Confirmed — ${pos[0].buyer_name || 'Unknown Buyer'} · PO#${pos[0].po_number || 'N/A'}`
+          : `${pos.length} PIs Confirmed Today`,
         html: wrapTemplate({
           accentColor: '#000000',
           iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="14 2 14 8 20 8" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="9 15 11 17 15 13" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
           badgeLabel: 'Confirmed',
           badgeColor: '#000000',
-          title: 'Proforma Invoice Confirmed',
-          subtitle: `PI received for order · PO#${poDetails.po_number || 'N/A'}`,
-          rows: [
-            ['Buyer',           poDetails.buyer_name],
-            ['Supplier',        poDetails.supplier_name],
-            ['PO Number',       poDetails.po_number],
-            ['PI Received',     poDetails.pi_received_date || poDetails.date],
-            ['Status',          'Confirmed'],
-          ],
+          title: 'Proforma Invoices Confirmed',
+          subtitle: pos.length === 1 ? `PI received for order · PO#${pos[0].po_number || 'N/A'}` : `${pos.length} PIs confirmed today`,
+          rows: pos.map(po => [
+            `PO#${po.po_number || 'N/A'}`,
+            `${po.buyer_name || 'Unknown Buyer'} → ${po.supplier_name || 'Unknown Supplier'} · received ${po.date || '—'}`,
+          ]),
           calloutBg: '#f5f5f5',
           calloutBorder: '#000000',
-          calloutText: '<strong>Next Steps:</strong> The Proforma Invoice has been confirmed successfully.',
+          calloutText: '<strong>Next Steps:</strong> The Proforma Invoice(s) above have been confirmed successfully.',
         }),
       };
+    }
 
     // ── PO deleted ───────────────────────────
    case 'PO_DELETED':
@@ -237,6 +289,30 @@ function generateEmailTemplate(alertType, alertMessage, poDetails) {
     }),
   };
 
+case 'PI_REMINDER_DIGEST': {
+  const pos = poDetails.pos || [];
+  return {
+    subject: pos.length === 1
+      ? `PI Due Tomorrow — ${pos[0].buyer_name} · PO#${pos[0].po_number || 'N/A'}`
+      : `PI Due Tomorrow — ${pos.length} POs need confirmation`,
+    html: wrapTemplate({
+      accentColor: '#000000',
+      iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="1.8"/><polyline points="12 6 12 12 16 14" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+      badgeLabel: 'Due Tomorrow',
+      badgeColor: '#000000',
+      title: 'PI Confirmation Due Tomorrow',
+      subtitle: pos.length === 1 ? `Last day to confirm · PO#${pos[0].po_number || 'N/A'}` : `${pos.length} POs · last day to confirm`,
+      rows: pos.map(po => [
+        `PO#${po.po_number || 'N/A'}`,
+        `${po.buyer_name || 'Unknown Buyer'} → ${po.supplier_name || 'Unknown Supplier'} · received ${po.date || '—'}`,
+      ]),
+      calloutBg: '#f5f5f5',
+      calloutBorder: '#000000',
+      calloutText: '<strong>Reminder:</strong> Tomorrow is the last day to confirm the Proforma Invoice for the order(s) above. Please log in to your dashboard and upload the PI before the deadline.',
+    }),
+  };
+}
+
 case 'PI_OVERDUE':
   return {
     subject: `PI Overdue — ${poDetails.buyer_name} · PO#${poDetails.po_number || 'N/A'}`,
@@ -259,6 +335,31 @@ case 'PI_OVERDUE':
       calloutText: '<strong>Action Required:</strong> The 5-day window to confirm the Proforma Invoice has passed. Please log in to your dashboard to either upload the PI or <strong>state the reason for delay</strong>.',
     }),
   };
+
+case 'PI_OVERDUE_DIGEST': {
+  const pos = poDetails.pos || [];
+  return {
+    subject: pos.length === 1
+      ? `PI Overdue — ${pos[0].buyer_name} · PO#${pos[0].po_number || 'N/A'}`
+      : `PI Overdue — ${pos.length} POs need attention`,
+    html: wrapTemplate({
+      accentColor: '#000000',
+      iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="9" x2="12" y2="13" stroke="white" stroke-width="1.8" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>',
+      badgeLabel: 'Overdue',
+      badgeColor: '#000000',
+      title: 'PI Confirmation Overdue',
+      subtitle: pos.length === 1 ? `${pos[0].days_since} days since PO received · PO#${pos[0].po_number || 'N/A'}` : `${pos.length} POs · action required`,
+      rows: pos.map(po => [
+        `PO#${po.po_number || 'N/A'}`,
+        `${po.buyer_name || 'Unknown Buyer'} → ${po.supplier_name || 'Unknown Supplier'} · ${po.days_since ?? '—'} days elapsed`,
+      ]),
+      calloutBg: '#f5f5f5',
+      calloutBorder: '#000000',
+      calloutText: '<strong>Action Required:</strong> The 5-day window to confirm the Proforma Invoice has passed for the order(s) above. Please log in to your dashboard to either upload the PI or <strong>state the reason for delay</strong>.',
+    }),
+  };
+}
+
   case 'PI_DELAY':
   return {
     subject: `PI Delay Reason Stated — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
@@ -455,6 +556,181 @@ case 'INSPECTION_SYNC_UPDATE':
       calloutText: '<strong>Action Required:</strong> A merchandising team member has raised an OTIF exception requesting a revised ex-factory date. Please log in to review and approve or reject this request.',
     }),
   };
+
+  case 'QUANTITY_CANCELLATION':
+  return {
+    subject: `Quantity Cancellation Requested — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
+    html: wrapTemplate({
+      accentColor: '#b45309',
+      iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="9" x2="12" y2="13" stroke="white" stroke-width="1.8" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>',
+      badgeLabel: 'Cancellation Requested',
+      badgeColor: '#b45309',
+      title: 'Quantity Cancellation Requested',
+      subtitle: `Pending your review · PO#${poDetails.po_number || 'N/A'}`,
+      rows: [
+        ['Buyer',              poDetails.buyer_name],
+        ['Supplier',           poDetails.supplier_name],
+        ['PO Number',          poDetails.po_number],
+        ['SKU',                poDetails.sku],
+        ['Requested Cancel Qty', poDetails.requested_quantity],
+        ['Order Qty',          poDetails.quantity_ordered],
+        ['Already Cancelled',  poDetails.already_cancelled],
+        ['Reason',             poDetails.reason],
+        ['Comment',            poDetails.comment],
+        ['Reported By',        poDetails.reported_by],
+      ],
+      calloutBg: '#fffbeb',
+      calloutBorder: '#b45309',
+      calloutText: '<strong>Action Required:</strong> A merchandising team member has requested a quantity cancellation for this SKU. Please log in to review and approve or reject this request.',
+    }),
+  };
+
+  case 'INSPECTION_SCHEDULED':
+    return {
+      subject: `Inspection Scheduled${poDetails.supplier_name ? ` ${poDetails.supplier_name}` : ''} -PO#${poDetails.po_number || 'N/A'} · ${poDetails.stage || ''}`,
+      html: wrapTemplate({
+        accentColor: '#0f766e',
+        iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="18" rx="2" stroke="white" stroke-width="1.8"/><line x1="16" y1="2" x2="16" y2="6" stroke="white" stroke-width="1.8" stroke-linecap="round"/><line x1="8" y1="2" x2="8" y2="6" stroke="white" stroke-width="1.8" stroke-linecap="round"/><line x1="3" y1="10" x2="21" y2="10" stroke="white" stroke-width="1.8"/></svg>',
+        badgeLabel: 'Scheduled',
+        badgeColor: '#0f766e',
+        title: 'Inspection Scheduled',
+        subtitle: `PO#${poDetails.po_number || 'N/A'} · ${poDetails.stage || ''}`,
+        rows: [
+          ['PO Number',       poDetails.po_number],
+          ['Customer',        poDetails.buyer_name],
+          ['Vendor',          poDetails.supplier_name],
+          ['SKUs',            poDetails.sku_list],
+          ['Inspection Date', poDetails.inspection_date],
+          ['Stage',           poDetails.stage],
+          ['Assigned QA',     poDetails.assigned_qa],
+          ['Scheduled By',    poDetails.scheduled_by],
+          ...(poDetails.rejected_skus ? [
+            ['Previously Rejected', poDetails.rejected_skus],
+            ['Re-assigned On',      poDetails.reassigned_date],
+          ] : []),
+        ],
+        calloutBg: '#f0fdfa',
+        calloutBorder: '#0f766e',
+        calloutText: 'An inspection has been scheduled for this purchase order. Please log in to your dashboard for full line-item and reporting details.',
+      }),
+    };
+
+  case 'INSPECTION_SUBMITTED': {
+    // sku_list already carries each SKU's own result inline (e.g. "23032
+    // (Accepted), 17430 (Rejected)") - one email can cover several SKUs at
+    // once (Send Mail's own batch send), so results aren't collapsed to one
+    // shared verdict for the whole PO.
+    const rejected = /\(Rejected\)/.test(poDetails.sku_list || '');
+    // Exact format requested: "<stage> - Inspection Submitted - PO#<no> -
+    // <buyer> - <vendor> - <result(s)> [TWFCMB<n>]" (dash-separated, stage
+    // abbreviation leading, batch number trailing in brackets). The stage is
+    // shortened to its 2-letter code (this app's own convention elsewhere -
+    // InspectionSchedule's STAGE_ABBR, PoSkuSummary.jsx's tabs), and
+    // <result(s)> is overall_status - a single shared result reads as just
+    // that word, a mixed batch as each distinct result with its own count
+    // (see routes/inspectionSchedule.js's resultCounts). The trailing
+    // [TWFCMB..] only appears when this send's attached PDF is a real
+    // combined/multi-report document with an actual allocated batch number
+    // (poDetails.batch_no, resolved server-side in routes/inspectionSchedule.js) -
+    // a single-SKU send has none, so the suffix is simply omitted there.
+    const STAGE_ABBR = { inline: 'IL', midline: 'ML', final: 'FN' };
+    const stageAbbr = STAGE_ABBR[poDetails.stage] || poDetails.stage || '';
+    return {
+      subject: `${stageAbbr ? `${stageAbbr} - ` : ''}Inspection ${rejected ? 'Results' : 'Submitted'} - PO#${poDetails.po_number || 'N/A'}${poDetails.buyer_name ? ` - ${poDetails.buyer_name}` : ''}${poDetails.supplier_name ? ` - ${poDetails.supplier_name}` : ''}${poDetails.overall_status ? ` - ${poDetails.overall_status}` : ''}${poDetails.batch_no ? ` [${poDetails.batch_no}]` : ''}`,
+      html: wrapTemplate({
+        accentColor: rejected ? '#b91c1c' : '#0f766e',
+        iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M9 12l2 2 4-4" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9" stroke="white" stroke-width="1.8"/></svg>',
+        badgeLabel: rejected ? 'Includes a rejection' : 'Submitted',
+        badgeColor: rejected ? '#b91c1c' : '#0f766e',
+        title: rejected ? 'Inspection Results' : 'Inspection Submitted',
+        subtitle: `PO#${poDetails.po_number || 'N/A'} · ${poDetails.stage || ''}`,
+        rows: [
+          ['PO Number',    poDetails.po_number],
+          ['Customer',     poDetails.buyer_name],
+          ['Vendor',       poDetails.supplier_name],
+          ['SKUs',         poDetails.sku_list],
+          ['Stage',        poDetails.stage],
+          ['Submitted By', poDetails.submitted_by],
+          ['Submitted At', poDetails.submitted_at],
+        ],
+        calloutBg: rejected ? '#fef2f2' : '#f0fdfa',
+        calloutBorder: rejected ? '#b91c1c' : '#0f766e',
+        // pdf_download_url is only ever set when the built report was too
+        // large to attach directly (see routes/inspectionSchedule.js) - a
+        // full-resolution, photo-heavy multi-SKU batch can run well past
+        // what any email provider will carry as an attachment, so this is
+        // the recipient's only way to actually get the report in that case.
+        calloutText: (rejected
+          ? 'One or more SKUs on this PO are rejected and will be rescheduled.'
+          : 'An inspection has been submitted for this purchase order. Please log in to your dashboard for full line-item and reporting details.'
+        ) + (poDetails.pdf_download_url
+          ? ` The report was too large to attach - <a href="${poDetails.pdf_download_url}" style="color:#111111;font-weight:700;">download it here</a>.`
+          : ''),
+      }),
+    };
+  }
+
+  case 'INSPECTION_REWORK_REQUESTED':
+    return {
+      subject: `Rework Requested - PO#${poDetails.po_number || 'N/A'}`,
+      html: wrapTemplate({
+        accentColor: '#b45309',
+        iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M1 4v6h6M23 20v-6h-6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        badgeLabel: 'Pending Review',
+        badgeColor: '#b45309',
+        title: 'Rework Requested',
+        subtitle: `Pending your review · PO#${poDetails.po_number || 'N/A'}`,
+        rows: [
+          ['Buyer',     poDetails.buyer_name],
+          ['PO Number', poDetails.po_number],
+          ['SKUs',      poDetails.sku_count],
+          ['Reason',    poDetails.reason],
+        ],
+        calloutBg: '#fffbeb',
+        calloutBorder: '#b45309',
+        calloutText: '<strong>Action Required:</strong> A QA has requested permission to redo an already-accepted inspection stage. Please log in to review and approve or reject this request.',
+      }),
+    };
+
+  case 'CALLOUT_POSTED':
+    return {
+      subject: `${poDetails.callout_type || 'Callout'} - PO#${poDetails.po_number || 'N/A'}`,
+      html: wrapTemplate({
+        accentColor: '#4338ca',
+        iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        badgeLabel: poDetails.callout_type || 'Callout',
+        badgeColor: '#4338ca',
+        title: poDetails.callout_type || 'Callout',
+        subtitle: `PO#${poDetails.po_number || 'N/A'}${poDetails.sku_ref ? ' · SKU ' + poDetails.sku_ref : ''}`,
+        rows: [
+          ['PO Number', poDetails.po_number],
+          ['Customer',  poDetails.buyer_name],
+          ['Vendor',    poDetails.supplier_name],
+          ['SKU',       poDetails.sku_ref],
+          ['Posted By', poDetails.posted_by],
+        ],
+        calloutBg: '#eef2ff',
+        calloutBorder: '#4338ca',
+        // The callout's own text is the whole point of this email - shown
+        // in full (not just a "log in for details" pointer, unlike the
+        // other cases above) since it's usually short enough to read
+        // inline. Every photo is bundled into one zip attachment when it
+        // fits (see the /callout-notify route + resolveEmailAttachment),
+        // but this text is generated before that attachment resolves - in
+        // production the actual download+zip happens later, in a separate
+        // queued worker (Cloud Tasks), fully decoupled from this template
+        // call - so it's never possible to know here whether the zip will
+        // actually make it through. Worded to stay true either way rather
+        // than asserting "attached" and sometimes being wrong (confirmed
+        // live: a real 98-photo callout zips to ~155MB, nowhere close to
+        // fitting any email provider's attachment limit).
+        calloutText: `${(poDetails.comment || '').replace(/\n/g, '<br/>')}`
+          + (poDetails.photo_count > 0
+            ? `<br/><br/><strong>${poDetails.photo_count} photo${poDetails.photo_count === 1 ? '' : 's'}</strong> - a zip is attached when the batch is small enough to email; for larger batches, or if you don't see it, please log in to your dashboard to view them.`
+            : ''),
+      }),
+    };
+
     // ── Default / fallback ───────────────────
     default:
       return {
@@ -509,7 +785,86 @@ async function sendBatchWithRetry(batchEmails, maxRetries = 6) {
   }
 }
 
-async function sendAlertEmail(recipients, alertMessage, poDetails, alertType = 'DEFAULT') {
+async function sendAttachedWithRetry(recipient, subject, html, pdfAttachment, maxRetries = 6) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const { data, error } = await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL || 'hi@eai7.com',
+      to: [recipient.email],
+      subject,
+      html,
+      attachments: [pdfAttachment],
+    });
+
+    if (!error) return { data, error: null };
+
+    const isRateLimit =
+      error.statusCode === 429 ||
+      (typeof error.message === 'string' && error.message.toLowerCase().includes('rate'));
+
+    if (isRateLimit && attempt < maxRetries) {
+      const delay = Math.min(Math.pow(2, attempt) * 500, 30000);
+      console.warn(`⏳ Resend rate limit hit - retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await sleep(delay);
+      continue;
+    }
+
+    return { data, error };
+  }
+}
+
+// Resend caps how many addresses one message's `to` can carry (commonly
+// cited around 50) - chunking past this defensively avoids a silently
+// dropped/rejected send for an unusually large recipient list, rather than
+// assuming this app's typical handful of PO stakeholders never grows.
+const MAX_COMBINED_TO = 45;
+
+// combinedTo mode: everyone in ONE email's `to`, so a Reply-All reaches the
+// whole group - the opposite of sendAttachedWithRetry/batch.send's
+// deliberate per-recipient isolation above, used only by callers that pass
+// `combinedTo: true` (inspection Send Mail / callout notifications - see
+// sendAlertEmail below). pdfAttachment is optional here since this same
+// helper serves both the attached and no-attachment combined cases.
+async function sendCombinedWithRetry(emails, subject, html, pdfAttachment, maxRetries = 6) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const { data, error } = await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL || 'hi@eai7.com',
+      to: emails,
+      subject,
+      html,
+      ...(pdfAttachment ? { attachments: [pdfAttachment] } : {}),
+    });
+
+    if (!error) return { data, error: null };
+
+    const isRateLimit =
+      error.statusCode === 429 ||
+      (typeof error.message === 'string' && error.message.toLowerCase().includes('rate'));
+
+    if (isRateLimit && attempt < maxRetries) {
+      const delay = Math.min(Math.pow(2, attempt) * 500, 30000);
+      console.warn(`⏳ Resend rate limit hit on combined send - retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await sleep(delay);
+      continue;
+    }
+
+    return { data, error };
+  }
+}
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// combinedTo (default false): every recipient together in ONE email's
+// `to`, so a Reply-All reaches everyone at once - used by inspection Send
+// Mail/callout notifications specifically (see inspectionSchedule.js's own
+// { combinedTo: true } call sites). Every other caller of sendAlertEmail
+// keeps today's default isolated-per-recipient behavior unchanged - this
+// is opt-in, not a new default, so it never silently changes privacy
+// behavior for an unrelated alert type.
+async function sendAlertEmail(recipients, alertMessage, poDetails, alertType = 'DEFAULT', attachment = null, { combinedTo = false } = {}) {
   try {
     const excludedEmails = ['nitin@jnitin.com', 'ritika@jnitin.com'];
 
@@ -532,13 +887,75 @@ async function sendAlertEmail(recipients, alertMessage, poDetails, alertType = '
       const emailList = filteredRecipients.map((r) => r.email);
 
       try {
-        await enqueueEmailBatch({ recipients: emailList, subject, html });
-        console.log(`📬 Queued batch of ${emailList.length} email(s) via Cloud Tasks`);
+        await enqueueEmailBatch({ recipients: emailList, subject, html, attachment, combinedTo });
+        console.log(`📬 Queued batch of ${emailList.length} email(s) via Cloud Tasks${combinedTo ? ' (combined To)' : ''}`);
         return { success: true, queued: emailList.length, successCount: emailList.length, failCount: 0 };
       } catch (err) {
         console.error('❌ Failed to enqueue email batch:', err.message);
         return { success: false, queued: 0, successCount: 0, failCount: emailList.length, criticalError: err.message };
       }
+    }
+
+    const pdfAttachment = attachment ? await require('./emailAttachments').resolveEmailAttachment(attachment) : null;
+
+    // ── Combined-To direct send (local dev) ─────────────────────────────────
+    // One email per chunk (chunked only if the recipient count ever exceeds
+    // Resend's own to: cap - see MAX_COMBINED_TO), every recipient in that
+    // chunk together in `to` instead of isolated - the whole point of this
+    // mode, confirmed acceptable for these specific alert types.
+    if (combinedTo) {
+      const chunks = chunk(filteredRecipients, MAX_COMBINED_TO);
+      const failedChunks = [];
+      const emailIds = [];
+      for (const c of chunks) {
+        const { data, error } = await sendCombinedWithRetry(c.map((r) => r.email), subject, html, pdfAttachment);
+        if (error) failedChunks.push({ emails: c.map((r) => r.email), error: error.message || 'Send failed' });
+        else emailIds.push(data.id);
+      }
+
+      console.log('\n📊 Combined Email Summary:');
+      console.log(`✅ Chunks sent: ${chunks.length - failedChunks.length}/${chunks.length}`);
+      if (failedChunks.length) console.log(`❌ Failed chunks: ${failedChunks.length}`);
+
+      return {
+        success: failedChunks.length === 0,
+        successCount: failedChunks.length === 0 ? filteredRecipients.length : filteredRecipients.length - failedChunks.reduce((n, f) => n + f.emails.length, 0),
+        failCount: failedChunks.reduce((n, f) => n + f.emails.length, 0),
+        failedRecipients: failedChunks.flatMap((f) => f.emails.map((email) => ({ email, error: f.error }))),
+        successfulRecipients: filteredRecipients.map((r) => r.email).filter((email) => !failedChunks.some((f) => f.emails.includes(email))),
+        emailIds,
+      };
+    }
+
+    // ── Attached direct send (local dev, with an attachment) ───────────────
+    // Resend's batch.send API doesn't support attachments, only the
+    // single-recipient emails.send does - so a resolved attachment forces a
+    // per-recipient loop instead of one batch call. Recipients stay isolated
+    // in their own `to: [email]` (matching batch.send's isolation) so no one
+    // sees anyone else's address. If the attachment fails to resolve (e.g.
+    // storage download error), fall through to the plain batch path below
+    // rather than sending an email with a broken/empty attachment.
+    if (pdfAttachment) {
+      const results = [];
+      const failedRecipients = [];
+      for (const recipient of filteredRecipients) {
+        const { data, error } = await sendAttachedWithRetry(recipient, subject, html, pdfAttachment);
+        if (error) failedRecipients.push({ email: recipient.email, error: error.message || 'Send failed' });
+        else results.push(data);
+      }
+
+      console.log('\n📊 Email Summary:');
+      console.log(`✅ Successfully sent: ${results.length}`);
+      console.log(`❌ Failed: ${failedRecipients.length}`);
+
+      return {
+        success: failedRecipients.length === 0,
+        successCount: results.length,
+        failCount: failedRecipients.length,
+        failedRecipients,
+        successfulRecipients: filteredRecipients.filter((r) => !failedRecipients.some((f) => f.email === r.email)).map((r) => r.email),
+        emailIds: results.map((d) => d.id),
+      };
     }
 
     // ── Direct batch fallback (local dev — no Cloud Tasks configured) ──────
