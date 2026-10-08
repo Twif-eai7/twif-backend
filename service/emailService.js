@@ -731,6 +731,100 @@ case 'INSPECTION_SYNC_UPDATE':
       }),
     };
 
+    // ── PM: assigned to a task ────────────────
+    case 'PM_TASK_ASSIGNED':
+      return {
+        subject: `Assigned: ${poDetails.task_title || 'New task'}`,
+        html: wrapTemplate({
+          accentColor: '#4d68f0',
+          iconChar: '📋',
+          badgeLabel: 'Assigned',
+          badgeColor: '#4d68f0',
+          title: 'You were assigned a task',
+          subtitle: poDetails.project_title || 'Project Management',
+          rows: [
+            ['Task',     poDetails.task_title],
+            ['Project',  poDetails.project_title],
+            ['Priority', poDetails.priority],
+            ['Due',      poDetails.due_date],
+            ['Assigned by', poDetails.actor_name],
+          ],
+          calloutBg: '#eef2ff',
+          calloutBorder: '#4d68f0',
+          calloutText: alertMessage || 'Open the project board to view the task.',
+        }),
+      };
+
+    // ── PM: mentioned in a comment ────────────
+    case 'PM_MENTIONED':
+      return {
+        subject: `${poDetails.actor_name || 'Someone'} mentioned you on ${poDetails.task_title || 'a task'}`,
+        html: wrapTemplate({
+          accentColor: '#8b5cf6',
+          iconChar: '@',
+          badgeLabel: 'Mention',
+          badgeColor: '#8b5cf6',
+          title: 'You were mentioned',
+          subtitle: poDetails.project_title || 'Project Management',
+          rows: [
+            ['Task',    poDetails.task_title],
+            ['Project', poDetails.project_title],
+            ['By',      poDetails.actor_name],
+          ],
+          calloutBg: '#f5f3ff',
+          calloutBorder: '#8b5cf6',
+          calloutText: alertMessage || 'Open the task to reply.',
+        }),
+      };
+
+    // ── PM: due-date reminder ─────────────────
+    case 'PM_TASK_REMINDER':
+      return {
+        subject: `Reminder: ${poDetails.task_title || 'Task'} is due ${poDetails.due_label || 'soon'}`,
+        html: wrapTemplate({
+          accentColor: '#f59e0b',
+          iconChar: '⏰',
+          badgeLabel: 'Reminder',
+          badgeColor: '#f59e0b',
+          title: 'Task due soon',
+          subtitle: poDetails.project_title || 'Project Management',
+          rows: [
+            ['Task',     poDetails.task_title],
+            ['Project',  poDetails.project_title],
+            ['Priority', poDetails.priority],
+            ['Due',      poDetails.due_date],
+          ],
+          calloutBg: '#fffbeb',
+          calloutBorder: '#f59e0b',
+          calloutText: alertMessage || 'This task is approaching its due date.',
+        }),
+      };
+
+    // ── PM: daily digest ──────────────────────
+    case 'PM_DAILY_DIGEST': {
+      const tasks = poDetails.tasks || [];
+      return {
+        subject: tasks.length === 1
+          ? `Today: ${tasks[0].title}`
+          : `${tasks.length} tasks due today`,
+        html: wrapTemplate({
+          accentColor: '#4d68f0',
+          iconChar: '📅',
+          badgeLabel: 'Daily Digest',
+          badgeColor: '#4d68f0',
+          title: 'Your tasks for today',
+          subtitle: `${tasks.length} task${tasks.length === 1 ? '' : 's'} due or overdue`,
+          rows: tasks.slice(0, 20).map(t => [
+            t.title || 'Untitled',
+            `${t.project_title || 'Project'} · ${t.due_label || t.due_date || 'due'} · ${t.priority || 'normal'}`,
+          ]),
+          calloutBg: '#eef2ff',
+          calloutBorder: '#4d68f0',
+          calloutText: alertMessage || 'Open Projects to review and update these tasks.',
+        }),
+      };
+    }
+
     // ── Default / fallback ───────────────────
     default:
       return {

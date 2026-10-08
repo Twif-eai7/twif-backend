@@ -490,4 +490,149 @@ router.post('/upload-alerts-digest', async (req, res) => {
   }
 });
 
+// ── PM due-date reminders (run every 5 minutes) ─────────────────────────────
+router.post('/pm-task-reminders', async (req, res) => {
+  const secret = req.headers['x-cron-secret']
+  if (secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  try {
+    const now = new Date()
+    const { data: pending, error } = await supabase
+      .from('pm_task_reminders')
+      .select('id, task_id, member_id, offset_minutes, channel, sent_at, pm_tasks(id, title, due_date, priority, project_id, deleted_at, completed_at)')
+      .is('sent_at', null)
+      .limit(500)
+    if (error) throw error
+
+    let sent = 0
+    for (const rem of pending || []) {
+      const task = rem.pm_tasks
+      if (!task || task.deleted_at || task.completed_at || !task.due_date) continue
+      const due = new Date(task.due_date)
+      const fireAt = new Date(due.getTime() - rem.offset_minutes * 60000)
+      if (fireAt > now) continue
+      if (due.getTime() + 60 * 60000 < now.getTime()) {
+        await supabase.from('pm_task_reminders').update({ sent_at: now.toISOString() }).eq('id', rem.id)
+        continue
+      }
+
+      const { data: project } = await supabase.from('pm_projects').select('title').eq('id', task.project_id).maybeSingle()
+      const { data: member } = await supabase.from('organization_members').select('id, full_name, email').eq('id', rem.member_id).maybeSingle()
+      if (!member) continue
+
+      const dueLabel = due.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+      const title = rem.offset_minutes >= 1440 ? `Due tomorrow: ${task.title}` : `Due soon: ${task.title}`
+
+      await supabase.from('pm_notifications').insert({
+        member_id: member.id,
+        task_id: task.id,
+        project_id: task.project_id,
+        type: 'reminder',
+        title,
+        body: `${project?.title || 'Project'} · due ${dueLabel}`,
+      })
+
+      if ((rem.channel === 'email' || rem.channel === 'both') && member.email) {
+        sendAlertEmail(
+          [{ email: member.email, name: member.full_name }],
+          `${task.title} is due ${dueLabel}`,
+          {
+            task_title: task.title,
+            project_title: project?.title,
+            priority: task.priority,
+            due_date: dueLabel,
+            due_label: dueLabel,
+          },
+          'PM_TASK_REMINDER'
+        ).catch(err => console.error('PM reminder email failed:', err.message))
+      }
+
+      await supabase.from('pm_task_reminders').update({ sent_at: now.toISOString() }).eq('id', rem.id)
+      sent++
+    }
+
+    let spawned = 0
+    try {
+      const { spawnCompletedRecurring } = require('../service/pmRecurrence')
+      spawned = await spawnCompletedRecurring(80)
+    } catch (spawnErr) {
+      console.error('PM recurrence spawn failed:', spawnErr.message)
+    }
+
+    return res.json({ success: true, sent, spawned })
+  } catch (err) {
+    console.error('POST /cron/pm-task-reminders:', err.message)
+    return res.status(500).json({ error: err.message })
+  }
+})
+
+// ── PM daily digest (run once a day ~ 8:00 IST) ─────────────────────────────
+router.post('/pm-daily-digest', async (req, res) => {
+  const secret = req.headers['x-cron-secret']
+  if (secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  try {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+    const { data: prefs } = await supabase.from('pm_notification_preferences').select('member_id, preferences')
+    const digestMemberIds = (prefs || [])
+      .filter(p => p.preferences?.daily_digest)
+      .map(p => p.member_id)
+
+    // Also include anyone with overdue/today tasks even if they haven't saved prefs — skip unless opted in.
+    if (!digestMemberIds.length) return res.json({ success: true, sent: 0 })
+
+    const { data: members } = await supabase
+      .from('organization_members')
+      .select('id, full_name, email')
+      .in('id', digestMemberIds)
+
+    let sent = 0
+    for (const member of members || []) {
+      if (!member.email) continue
+      const { data: assigned } = await supabase
+        .from('pm_task_assignees')
+        .select('task_id, pm_tasks(id, title, due_date, priority, project_id, deleted_at, completed_at)')
+        .eq('member_id', member.id)
+
+      const tasks = (assigned || [])
+        .map(a => a.pm_tasks)
+        .filter(t => t && !t.deleted_at && !t.completed_at && t.due_date)
+        .filter(t => {
+          const d = new Date(t.due_date).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+          return d <= today
+        })
+
+      if (!tasks.length) continue
+
+      const projectIds = [...new Set(tasks.map(t => t.project_id))]
+      const { data: projects } = await supabase.from('pm_projects').select('id, title').in('id', projectIds)
+      const pmap = Object.fromEntries((projects || []).map(p => [p.id, p.title]))
+      const rows = tasks.map(t => ({
+        title: t.title,
+        project_title: pmap[t.project_id],
+        priority: t.priority,
+        due_date: new Date(t.due_date).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+        due_label: new Date(t.due_date).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) < today ? 'Overdue' : 'Due today',
+      }))
+
+      sendAlertEmail(
+        [{ email: member.email, name: member.full_name }],
+        `${rows.length} task${rows.length === 1 ? '' : 's'} due today or overdue`,
+        { tasks: rows },
+        'PM_DAILY_DIGEST'
+      ).catch(err => console.error('PM digest failed:', err.message))
+      sent++
+    }
+
+    return res.json({ success: true, sent })
+  } catch (err) {
+    console.error('POST /cron/pm-daily-digest:', err.message)
+    return res.status(500).json({ error: err.message })
+  }
+})
+
 module.exports = router;
