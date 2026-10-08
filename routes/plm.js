@@ -4057,15 +4057,22 @@ router.patch('/sku-sample-orders/:id', requireAuth, async (req, res) => {
       // cm/kg regardless of the CM/IN or KG/LB display toggle (WorkspaceModal.jsx converts on
       // input), so the activity log — read later with no toggle context at all — needs the
       // unit spelled out explicitly rather than relying on that guarantee being obvious.
+      // The values themselves stay stored in cm/kg, but the log lines are shown in whichever
+      // unit the editor had selected (client sends displayUnits) so the chat matches what they typed.
+      const dispDimUnit = req.body.displayUnits?.dim === 'in' ? 'in' : 'cm'
+      const dispWtUnit  = req.body.displayUnits?.weight === 'lb' ? 'lb' : 'kg'
+      const cvtDim = (v) => (dispDimUnit === 'in' && v != null && v !== '' && !isNaN(parseFloat(v))) ? (parseFloat(v) / 2.54).toFixed(2) : v
+      const cvtWt  = (v) => (dispWtUnit === 'lb' && v != null && v !== '' && !isNaN(parseFloat(v))) ? (parseFloat(v) / 0.453592).toFixed(2) : v
       const SINGLE_FIELDS = ['actual_weight', 'inner_qty', 'inner_weight', 'master_qty', 'master_pack_weight_kg', 'cbm']
-      const SINGLE_FIELD_UNITS = { actual_weight: ' kg', inner_weight: ' kg', master_pack_weight_kg: ' kg' }
+      const SINGLE_FIELD_UNITS = { actual_weight: ` ${dispWtUnit}`, inner_weight: ` ${dispWtUnit}`, master_pack_weight_kg: ` ${dispWtUnit}` }
+      const WEIGHT_FIELDS = new Set(['actual_weight', 'inner_weight', 'master_pack_weight_kg'])
       for (const f of SINGLE_FIELDS) {
         if (!(f in fields.findings)) continue
         const oldVal = oldF[f] ?? ''
         const newVal = newF[f] ?? ''
         if (String(oldVal) !== String(newVal)) {
           const unit = SINGLE_FIELD_UNITS[f] || ''
-          const fmtVal = (v) => (v !== '' && v != null) ? `${v}${unit}` : v
+          const fmtVal = (v) => (v !== '' && v != null) ? `${WEIGHT_FIELDS.has(f) ? cvtWt(v) : v}${unit}` : v
           await insertSystemComment2(order.workspace_id, memberId, role, 'field_change', null,
             { field: f, from: fmtVal(oldVal), to: fmtVal(newVal) })
         }
@@ -4087,7 +4094,7 @@ router.patch('/sku-sample-orders/:id', requireAuth, async (req, res) => {
         const newVals = subKeys.map(k => newF[k])
         const changed = oldVals.some((v, i) => String(v ?? '') !== String(newVals[i] ?? ''))
         if (!changed) continue
-        const fmt = vals => vals.some(v => v != null && v !== '') ? `${vals.map(v => v ?? '—').join(' × ')} cm` : ''
+        const fmt = vals => vals.some(v => v != null && v !== '') ? `${vals.map(v => cvtDim(v) ?? '—').join(' × ')} ${dispDimUnit}` : ''
         await insertSystemComment2(order.workspace_id, memberId, role, 'field_change', null,
           { field, from: fmt(oldVals), to: fmt(newVals) })
       }
@@ -4099,7 +4106,7 @@ router.patch('/sku-sample-orders/:id', requireAuth, async (req, res) => {
       // whatever "from"/"to" string it's given straight into the activity line.
       if ('master_cartons' in fields.findings) {
         const fmtCartons = (cartons) => (cartons || []).length
-          ? cartons.map((c, i) => `Carton ${i + 1}: Qty ${c?.qty || '—'}, ${c?.l || '—'}×${c?.w || '—'}×${c?.h || '—'} cm${c?.weight ? `, ${c.weight}kg` : ''}`).join('; ')
+          ? cartons.map((c, i) => `Carton ${i + 1}: Qty ${c?.qty || '—'}, ${cvtDim(c?.l) || '—'}×${cvtDim(c?.w) || '—'}×${cvtDim(c?.h) || '—'} ${dispDimUnit}${c?.weight ? `, ${cvtWt(c.weight)}${dispWtUnit}` : ''}`).join('; ')
           : ''
         const from = fmtCartons(oldF.master_cartons)
         const to   = fmtCartons(newF.master_cartons)
