@@ -4,7 +4,9 @@ const Replicate = require('replicate')
 const supabase = require('../supabaseClient')
 
 const BUCKET = 'article-3d'
-const MODEL = 'tencent/hunyuan3d-2'
+// Community model: /models/tencent/hunyuan3d-2/predictions returns 404.
+// Call the pinned version through POST /predictions instead.
+const MODEL_VERSION = 'b1b9449a1277e10402781c5d41eb30c0a0683504fb23fab591ca9dfc2aabe1cb'
 const MAX_JPEG_BYTES = 6 * 1024 * 1024
 const MAX_MODEL_BYTES = 40 * 1024 * 1024
 const SAVE_STALE_MS = 2 * 60 * 1000
@@ -141,7 +143,7 @@ async function createJob(userId, buffer) {
     }
 
     const prediction = await replicateClient().predictions.create({
-      model: MODEL,
+      version: MODEL_VERSION,
       input: {
         image: signed.data.signedUrl,
         remove_background: true,
