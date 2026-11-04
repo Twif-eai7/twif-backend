@@ -141,6 +141,8 @@ app.use('/dashboard', dashboardRoutes);
 app.use('/admin', adminRoutes);
 app.use('/npd', npdRoutes);
 app.use('/plm', plmRoutes);
+const pmRoutes = require('./routes/pm');
+app.use('/pm', pmRoutes);
 app.use('/plm/admin', plmAdminRoutes);
 app.use('/pct', pctRoutes);
 app.use('/travel-expenses', travelExpensesroutes);

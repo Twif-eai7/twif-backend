@@ -1906,6 +1906,63 @@ router.post('/', requireAuth, async (req, res) => {
 })
 
 // ─────────────────────────────────────────────
+// GET /customers/my-membership
+// Membership for the signed-in email. Re-links a row whose user_id is stale
+// (the auth user was recreated) so an existing buyer/merchant/supplier is not
+// sent through registration again.
+// ─────────────────────────────────────────────
+router.get('/my-membership', requireAuth, async (req, res) => {
+  try {
+    const { id: userId, email } = req.user
+    const normalised = (email || '').toLowerCase().trim()
+    const memberSelect = `
+      id, role, full_name, email, user_id, department, allowed_modules, assigned_regions,
+      organizations ( id, type, name, display_name, status, logo_url )
+    `
+
+    let { data: member, error } = await supabase
+      .from('organization_members')
+      .select(memberSelect)
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (error) throw error
+
+    if (!member && normalised) {
+      const { data: byEmail, error: emailErr } = await supabase
+        .from('organization_members')
+        .select(memberSelect)
+        .eq('email', normalised)
+        .limit(1)
+      if (emailErr) throw emailErr
+      member = byEmail?.[0] || null
+      if (member && member.user_id !== userId) {
+        const { error: linkErr } = await supabase
+          .from('organization_members')
+          .update({ user_id: userId })
+          .eq('id', member.id)
+          .eq('email', normalised)
+        if (linkErr) throw linkErr
+        member.user_id = userId
+      }
+    }
+
+    const status = member?.organizations?.status
+    const live = member?.organizations && status !== 'pending' && status !== 'rejected' && status !== 'suspended'
+    if (live) {
+      await supabase.from('portal_users').upsert(
+        { id: userId, email: normalised, onboarding_completed: true },
+        { onConflict: 'id' },
+      )
+    }
+
+    return res.json({ success: true, data: member || null })
+  } catch (err) {
+    console.error('GET /my-membership error:', err.message)
+    return res.status(500).json({ error: 'Failed to retrieve membership' })
+  }
+})
+
+// ─────────────────────────────────────────────
 // GET /customers/customer/:userId
 // Get own org membership — users can only fetch their own
 // ─────────────────────────────────────────────
