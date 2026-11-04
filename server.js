@@ -38,10 +38,11 @@ const courierLogsRoutes = require('./routes/courierLogs');
 const internationalCourierLogsRoutes = require('./routes/internationalCourierLogs');
 const internalEmailRoutes = require('./routes/internalEmail');
 const authOtpRoutes = require('./routes/authOtp');
+const article3dRoutes = require('./routes/article3d');
 
  
 // --- Environment Variable Validation ---
-const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY} = process.env;
+const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY, REPLICATE_API_TOKEN } = process.env;
 const PORT = process.env.PORT || 8080;
 
 
@@ -52,6 +53,10 @@ if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_TOKEN) {
 
 if (!GEMINI_API_KEY) {
     console.error("Missing GEMINI_API_KEY environment variable. AI Search will fail.");
+}
+
+if (!REPLICATE_API_TOKEN) {
+    console.error("Missing REPLICATE_API_TOKEN environment variable. Article photo to 3D will fail.");
 }
 
 // --- App Initialization & Middleware ---
@@ -143,6 +148,7 @@ app.use('/skus', skuItemsRoutes)
 app.use('/logistics/courier-logs', courierLogsRoutes);
 app.use('/logistics/international-courier-logs', internationalCourierLogsRoutes);
 app.use('/internal', internalEmailRoutes);
+app.use('/article-3d', article3dRoutes);
 // --- Core Routes ---
 app.get("/health", (req, res) => {
   res.json({
