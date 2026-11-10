@@ -7,7 +7,8 @@ const BUCKET = 'article-3d'
 // Community model. Call the pinned version through POST /predictions.
 // ndreca/hunyuan3d-2.1 returns a textured GLB and runs on Replicate GPUs.
 const MODEL_VERSION = '895e514f953d39e8b5bfb859df9313481ad3fa3a8631e5c54c7e5c9c85a6aa9f'
-const MAX_FACE_NUM = 100000
+const MAX_FACE_NUM = 200000
+const OCTREE_RESOLUTION = 512
 const MAX_JPEG_BYTES = 6 * 1024 * 1024
 const MAX_MODEL_BYTES = 40 * 1024 * 1024
 const SAVE_STALE_MS = 2 * 60 * 1000
@@ -150,6 +151,7 @@ async function createJob(userId, buffer) {
         generate_texture: true,
         remove_background: true,
         max_facenum: MAX_FACE_NUM,
+        octree_resolution: OCTREE_RESOLUTION,
       },
     })
 
