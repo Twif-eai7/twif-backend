@@ -4,10 +4,10 @@ const Replicate = require('replicate')
 const supabase = require('../supabaseClient')
 
 const BUCKET = 'article-3d'
-// Official model. Call by name so the request hits
-// POST /v1/models/tencent/hunyuan-3d-3.1/predictions.
-const MODEL_NAME = 'tencent/hunyuan-3d-3.1'
-const FACE_COUNT = 150000
+// Community model. Call the pinned version through POST /predictions.
+// firtoz/trellis returns a textured GLB in output.model_file.
+const MODEL_VERSION = 'e8f6c45206993f297372f5436b90350817bd9b4a0d52d2a76df50c1c8afa2b3c'
+const TEXTURE_SIZE = 2048
 const MAX_JPEG_BYTES = 6 * 1024 * 1024
 const MAX_MODEL_BYTES = 40 * 1024 * 1024
 const SAVE_STALE_MS = 2 * 60 * 1000
@@ -88,7 +88,7 @@ function extractModelUrl(output) {
     return output.find((item) => typeof item === 'string' && item.startsWith('http')) || null
   }
   if (typeof output === 'object') {
-    const candidate = output.mesh || output.mesh_paint || output.model || output.glb
+    const candidate = output.model_file || output.mesh || output.mesh_paint || output.model || output.glb
     return typeof candidate === 'string' ? candidate : null
   }
   return null
@@ -144,12 +144,15 @@ async function createJob(userId, buffer) {
     }
 
     const prediction = await replicateClient().predictions.create({
-      model: MODEL_NAME,
+      version: MODEL_VERSION,
       input: {
-        image: signed.data.signedUrl,
-        generate_type: 'Normal',
-        face_count: FACE_COUNT,
-        enable_pbr: false,
+        images: [signed.data.signedUrl],
+        generate_model: true,
+        generate_color: false,
+        generate_normal: false,
+        save_gaussian_ply: false,
+        texture_size: TEXTURE_SIZE,
+        mesh_simplify: 0.9,
       },
     })
 
