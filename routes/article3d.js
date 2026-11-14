@@ -2,7 +2,7 @@ const express = require('express')
 const rateLimit = require('express-rate-limit')
 const multer = require('multer')
 const { requireAuth } = require('../middleware/auth')
-const { createJob, getJob, readModel } = require('../service/article3dService')
+const { createJob, getJob, listReadyJobs, readModel } = require('../service/article3dService')
 
 const router = express.Router()
 
@@ -48,6 +48,19 @@ router.post('/jobs', requireAuth, createLimiter, runUpload, async (req, res) => 
     const status = err.status || 500
     res.status(status).json({
       error: status === 500 ? 'Could not start 3D generation.' : err.message,
+    })
+  }
+})
+
+router.get('/jobs', requireAuth, async (req, res) => {
+  try {
+    const jobs = await listReadyJobs(req.user.id)
+    res.json({ jobs })
+  } catch (err) {
+    console.error('article 3d list failed:', err.message)
+    const status = err.status || 500
+    res.status(status).json({
+      error: status === 500 ? 'Could not load saved models.' : err.message,
     })
   }
 })

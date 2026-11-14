@@ -103,6 +103,29 @@ function present(job) {
   }
 }
 
+const SAVED_LIMIT = 24
+
+async function listReadyJobs(userId) {
+  const { data, error } = await supabase
+    .from('article_3d_jobs')
+    .select('id, created_at, source_path')
+    .eq('user_id', userId)
+    .eq('status', 'ready')
+    .order('created_at', { ascending: false })
+    .limit(SAVED_LIMIT)
+  if (error) throw mapDbError(error)
+
+  const jobs = await Promise.all((data || []).map(async (job) => {
+    let photoUrl = null
+    if (job.source_path) {
+      const signed = await supabase.storage.from(BUCKET).createSignedUrl(job.source_path, 60 * 60)
+      photoUrl = signed.data?.signedUrl || null
+    }
+    return { id: job.id, createdAt: job.created_at, photoUrl }
+  }))
+  return jobs
+}
+
 async function loadJob(id, userId) {
   const { data, error } = await supabase
     .from('article_3d_jobs')
@@ -284,4 +307,4 @@ async function readModel(userId, id) {
   return Buffer.from(await downloaded.data.arrayBuffer())
 }
 
-module.exports = { createJob, getJob, readModel }
+module.exports = { createJob, getJob, listReadyJobs, readModel }
