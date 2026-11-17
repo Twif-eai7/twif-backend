@@ -5731,6 +5731,39 @@ function videoError(res, err, label) {
   return res.status(status >= 400 && status < 600 ? status : 500).json({ error: err.message })
 }
 
+function inviteIsClosed(invite) {
+  if (!invite) return false
+  if (vedeeo.isClosed(invite)) return true
+  return vedeeo.isRinging(invite) && vedeeo.isInviteExpired(invite)
+}
+
+function acceptRejectedAsEnded(err) {
+  if (err?.status === 410) return true
+  if (!(err?.status >= 400 && err.status < 500)) return false
+  const msg = String(err.message || '').toLowerCase()
+  return /no longer ringing|not ringing|is not ringing|isn't ringing|already ended|already closed|already cancelled|already canceled|already expired|already declined|invite has ended|call has ended/.test(msg)
+}
+
+async function acceptOrEnded(inviteId, memberId) {
+  let current = null
+  try {
+    current = await vedeeo.getInvite(inviteId)
+  } catch {
+    current = null
+  }
+  if (inviteIsClosed(current)) {
+    throw new vedeeo.VedeeoError('This video call has ended. Start a new call.', 410)
+  }
+  try {
+    return await vedeeo.acceptInvite(inviteId, memberId)
+  } catch (err) {
+    if (acceptRejectedAsEnded(err)) {
+      throw new vedeeo.VedeeoError('This video call has ended. Start a new call.', 410)
+    }
+    throw err
+  }
+}
+
 /**
  * POST /plm/sku-workspaces/:id/video-call
  * Caller: create a Vedeeo ringing invite and return hostJoinUrl (embed).
@@ -5754,10 +5787,7 @@ router.post('/sku-workspaces/:id/video-call', async (req, res) => {
     const existing = await vedeeo.findOpenInvite(id, memberId, workspace.video_room_name)
     if (existing) {
       if (existing.calleeUserId === memberId && vedeeo.isRinging(existing)) {
-        const accepted = await vedeeo.acceptInvite(existing.inviteId, memberId)
-        if (accepted?.roomId && !(await vedeeo.roomIsLive(accepted.roomId))) {
-          return res.status(410).json({ error: 'This video call has ended. Start a new call.' })
-        }
+        const accepted = await acceptOrEnded(existing.inviteId, memberId)
         await persistVideoInvite(id, accepted)
         const comment = await insertVideoCallComment(id, memberId, role, {
           event: 'video_call_accepted',
@@ -5839,12 +5869,7 @@ router.post('/sku-workspaces/:id/video-call/accept', async (req, res) => {
     const resolvedId = inviteId || workspace.video_room_name
     if (!resolvedId) return res.status(400).json({ error: 'No ringing invite to accept' })
 
-    const accepted = await vedeeo.acceptInvite(resolvedId, memberId)
-    if (accepted?.roomId && !(await vedeeo.roomIsLive(accepted.roomId))) {
-      await vedeeo.deleteRoom(accepted.roomId)
-      await clearVideoInvite(id)
-      return res.status(410).json({ error: 'This video call has ended. Start a new call.' })
-    }
+    const accepted = await acceptOrEnded(resolvedId, memberId)
     await persistVideoInvite(id, accepted)
     const role = workspaceChatRole(workspace, memberId)
     const comment = await insertVideoCallComment(id, memberId, role, {

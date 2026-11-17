@@ -207,11 +207,32 @@ async function getRoom(roomId) {
   }
 }
 
+const ENDED_ROOM_STATUSES = ['ENDED', 'EXPIRED', 'CLOSED', 'CANCELLED', 'CANCELED']
+
+function roomStatus(room) {
+  return String(room?.status || '').toUpperCase()
+}
+
 async function roomIsLive(roomId) {
   const room = await getRoom(roomId)
   if (!room) return false
-  const status = String(room.status || '').toUpperCase()
-  return !['ENDED', 'EXPIRED', 'CLOSED', 'CANCELLED', 'CANCELED'].includes(status)
+  return !ENDED_ROOM_STATUSES.includes(roomStatus(room))
+}
+
+// A missing room is not an ended call. Only an explicit terminal status is.
+async function roomIsExplicitlyEnded(roomId) {
+  if (!roomId) return false
+  const room = await getRoom(roomId)
+  if (!room) return false
+  return ENDED_ROOM_STATUSES.includes(roomStatus(room))
+}
+
+async function inviteIsReusable(invite) {
+  if (!isOpenInvite(invite)) return false
+  if (isRinging(invite)) return true
+  if (!isAccepted(invite)) return false
+  if (!invite.roomId) return true
+  return !(await roomIsExplicitlyEnded(invite.roomId))
 }
 
 async function deleteRoom(roomId) {
@@ -236,9 +257,17 @@ async function findOpenInvite(conversationId, userId, storedInviteId) {
       if (one) invites.push(one)
     } catch { /* expired / unknown */ }
   }
-  const mine = invites.filter(i => isOpenInvite(i) && userIsOnInvite(i, userId))
+  const mine = invites.filter(i => userIsOnInvite(i, userId))
+  const ordered = []
+  if (storedInviteId) {
+    const stored = mine.find(i => i.inviteId === storedInviteId)
+    if (stored) ordered.push(stored)
+  }
   for (const invite of mine) {
-    if (invite.roomId && await roomIsLive(invite.roomId)) return invite
+    if (invite.inviteId !== storedInviteId) ordered.push(invite)
+  }
+  for (const invite of ordered) {
+    if (await inviteIsReusable(invite)) return invite
   }
   return null
 }
